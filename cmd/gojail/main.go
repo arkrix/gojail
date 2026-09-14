@@ -10,6 +10,16 @@ import (
 )
 
 func main() {
+	// Check if this execution is an internal re-exec child call
+	if len(os.Args) > 2 && os.Args[1] == "__init_child__" {
+		if err := sandbox.InitChild(os.Args[2]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error in child init: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Standard CLI flag parsing
 	cmdFlag := flag.String("cmd", "/bin/sh", "Command to execute")
 	codeFlag := flag.String("c", "", "Inline command or script body")
 	timeoutSec := flag.Int("timeout", 5, "Timeout in seconds")
@@ -30,7 +40,7 @@ func main() {
 		Timeout:          time.Duration(*timeoutSec) * time.Second,
 		Command:          *cmdFlag,
 		Args:             []string{"-c", *codeFlag},
-		Env:              []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+		Env:              []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/tmp"},
 	}
 
 	runner := sandbox.NewRunner(cfg)
