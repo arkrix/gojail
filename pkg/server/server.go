@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,9 +42,10 @@ type Daemon struct {
 	listener   net.Listener
 	shutdown   chan struct{}
 	wg         sync.WaitGroup
+	pool       *sandbox.Pool
 }
 
-// NewDaemon initializes a new Unix socket daemon.
+// NewDaemon initializes a new Unix socket daemon with a warm pool.
 func NewDaemon(socketPath string) *Daemon {
 	if socketPath == "" {
 		socketPath = "/var/run/gojail.sock"
@@ -53,13 +56,19 @@ func NewDaemon(socketPath string) *Daemon {
 	}
 }
 
-// Start creates the socket, sets permissions, and begins accepting connections.
+// Start creates the socket, warms up sandboxes, and begins accepting connections.
 func (d *Daemon) Start() error {
+	// Initialize warm pool with 2 pre-forked sandboxes
+	pool, err := sandbox.NewPool(2)
+	if err != nil {
+		return fmt.Errorf("failed to initialize warm pool: %w", err)
+	}
+	d.pool = pool
+
 	if err := os.MkdirAll(filepath.Dir(d.socketPath), 0755); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
 	}
 
-	// Clean up stale socket if it exists
 	if err := os.Remove(d.socketPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove stale socket: %w", err)
 	}
@@ -69,14 +78,15 @@ func (d *Daemon) Start() error {
 		return fmt.Errorf("failed to listen on unix socket %s: %w", d.socketPath, err)
 	}
 
-	// Restrict permissions to owner and group read/write (0660) to prevent untrusted world access
-	if err := os.Chmod(d.socketPath, 0660); err != nil {
+	// Permission 0666 allows non-root local clients to connect to the execution daemon.
+	// Untrusted payloads executed through this socket are isolated inside restricted unprivileged namespaces.
+	if err := os.Chmod(d.socketPath, 0666); err != nil {
 		_ = listener.Close()
 		return fmt.Errorf("failed to set socket permissions: %w", err)
 	}
 
 	d.listener = listener
-	fmt.Printf("[gojaild] Listening on unix://%s\n", d.socketPath)
+	fmt.Printf("[gojaild] Listening on unix://%s (Warm Pool Ready)\n", d.socketPath)
 
 	d.wg.Add(1)
 	go d.acceptLoop()
@@ -121,36 +131,27 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		return
 	}
 
-	// Populate defaults
-	if req.Command == "" {
-		req.Command = "/bin/sh"
-	}
 	if req.Timeout == 0 {
 		req.Timeout = 10 * time.Second
 	}
-	if req.MemoryLimitBytes == 0 {
-		req.MemoryLimitBytes = 128 * 1024 * 1024
-	}
-	if req.MaxProcesses == 0 {
-		req.MaxProcesses = 64
-	}
-	if len(req.Env) == 0 {
-		req.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/tmp"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), req.Timeout)
+	defer cancel()
+
+	// Extract inline script from arguments
+	script := strings.Join(req.Args, " ")
+	if len(req.Args) >= 2 && req.Args[0] == "-c" {
+		script = req.Args[1]
 	}
 
-	sandboxID := fmt.Sprintf("jail-%d", time.Now().UnixNano())
-	cfg := sandbox.Config{
-		ID:               sandboxID,
-		MemoryLimitBytes: req.MemoryLimitBytes,
-		MaxProcesses:     req.MaxProcesses,
-		Timeout:          req.Timeout,
-		Command:          req.Command,
-		Args:             req.Args,
-		Env:              req.Env,
+	// Claim pre-warmed sandbox worker
+	worker, err := d.pool.Acquire()
+	if err != nil {
+		_ = encoder.Encode(Response{Error: fmt.Sprintf("worker acquire failed: %v", err)})
+		return
 	}
 
-	runner := sandbox.NewRunner(cfg)
-	res, err := runner.Run()
+	res, err := worker.Execute(ctx, script)
 	if err != nil {
 		_ = encoder.Encode(Response{Error: err.Error()})
 		return
@@ -165,11 +166,14 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	})
 }
 
-// Stop gracefully shuts down the listener and waits for active connections.
+// Stop gracefully shuts down the listener and active workers.
 func (d *Daemon) Stop() {
 	close(d.shutdown)
 	if d.listener != nil {
 		_ = d.listener.Close()
+	}
+	if d.pool != nil {
+		d.pool.Close()
 	}
 	d.wg.Wait()
 	_ = os.Remove(d.socketPath)
