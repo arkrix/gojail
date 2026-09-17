@@ -106,6 +106,10 @@ func (r *Runner) Run() (*Result, error) {
 		}
 	}
 
+	if timedOut && exitCode == 0 {
+		exitCode = 124
+	}
+
 	return &Result{
 		ExitCode: exitCode,
 		Stdout:   stdoutBuf.String(),
@@ -122,9 +126,7 @@ func configureLoopback() error {
 		return fmt.Errorf("failed to find lo interface: %w", err)
 	}
 
-	// Equivalent to: ip link set lo up
 	if err := unix.IoctlSetInt(0, unix.SIOCSIFFLAGS, lo.Index); err != nil {
-		// Ignore if non-fatal or use netlink fallback
 		_ = err
 	}
 	return nil
@@ -177,7 +179,7 @@ func InitChild(cfgJSON string) error {
 		return fmt.Errorf("child: failed to create sandbox /tmp: %w", err)
 	}
 	if err := syscall.Mount("tmpfs", sandboxTmp, "tmpfs", 0, "size=32m"); err != nil {
-		return fmt.Errorf("child: failed to mount sandbox /tmp: %w", err)
+		return fmt.Errorf("child: failed to mount sandbox /tmp tmpfs: %w", err)
 	}
 
 	// 5. Chroot into the jail root
@@ -201,9 +203,12 @@ func InitChild(cfgJSON string) error {
 		return fmt.Errorf("child: seccomp filter failed: %w", err)
 	}
 
-	// 9. Drop user credentials down to nobody (65534)
+	// 9. Drop supplementary groups and drop user credentials to nobody (65534)
 	const unprivilegedUID = 65534
 	const unprivilegedGID = 65534
+	if err := syscall.Setgroups([]int{unprivilegedGID}); err != nil {
+		return fmt.Errorf("child: setgroups failed: %w", err)
+	}
 	if err := syscall.Setgid(unprivilegedGID); err != nil {
 		return fmt.Errorf("child: setgid failed: %w", err)
 	}
