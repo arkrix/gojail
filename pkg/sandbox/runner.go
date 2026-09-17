@@ -132,6 +132,53 @@ func configureLoopback() error {
 	return nil
 }
 
+// mountSystemDirs bind-mounts essential root directories as read-only.
+func mountSystemDirs(targetRoot string) error {
+	essentialDirs := []string{"bin", "lib", "lib64", "usr", "etc"}
+	for _, dir := range essentialDirs {
+		src := "/" + dir
+		fi, err := os.Stat(src)
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+
+		dst := filepath.Join(targetRoot, dir)
+		if err := os.MkdirAll(dst, 0755); err != nil {
+			return fmt.Errorf("failed to mkdir %s: %w", dst, err)
+		}
+		if err := syscall.Mount(src, dst, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+			return fmt.Errorf("failed to bind mount %s: %w", dir, err)
+		}
+		if err := syscall.Mount("", dst, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY, ""); err != nil {
+			return fmt.Errorf("failed to remount %s read-only: %w", dir, err)
+		}
+	}
+	return nil
+}
+
+// dropPrivileges removes root capabilities and drops to nobody (65534).
+func dropPrivileges() error {
+	const unprivilegedUID = 65534
+	const unprivilegedGID = 65534
+
+	if err := DropCapabilities(); err != nil {
+		return fmt.Errorf("capability drop failed: %w", err)
+	}
+	if err := ApplySeccompDenylist(); err != nil {
+		return fmt.Errorf("seccomp filter failed: %w", err)
+	}
+	if err := syscall.Setgroups([]int{unprivilegedGID}); err != nil {
+		return fmt.Errorf("setgroups failed: %w", err)
+	}
+	if err := syscall.Setgid(unprivilegedGID); err != nil {
+		return fmt.Errorf("setgid failed: %w", err)
+	}
+	if err := syscall.Setuid(unprivilegedUID); err != nil {
+		return fmt.Errorf("setuid failed: %w", err)
+	}
+	return nil
+}
+
 // InitChild executes inside the new namespace before the target workload runs.
 func InitChild(cfgJSON string) error {
 	var cfg Config
@@ -139,12 +186,10 @@ func InitChild(cfgJSON string) error {
 		return fmt.Errorf("child: failed to parse config: %w", err)
 	}
 
-	// 1. Private mount propagation
 	if err := syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("child: failed to make root private: %w", err)
 	}
 
-	// 2. Ephemeral tmpfs jail root
 	targetRoot, err := os.MkdirTemp("", "gojail-root-*")
 	if err != nil {
 		return fmt.Errorf("child: failed to create jail root tempdir: %w", err)
@@ -155,25 +200,10 @@ func InitChild(cfgJSON string) error {
 		return fmt.Errorf("child: failed to mount tmpfs root: %w", err)
 	}
 
-	// 3. Bind mount system binaries & libraries as Read-Only
-	essentialDirs := []string{"bin", "lib", "lib64", "usr", "etc"}
-	for _, dir := range essentialDirs {
-		src := "/" + dir
-		if fi, err := os.Stat(src); err == nil && fi.IsDir() {
-			dst := filepath.Join(targetRoot, dir)
-			if err := os.MkdirAll(dst, 0755); err != nil {
-				return fmt.Errorf("child: failed to mkdir %s: %w", dst, err)
-			}
-			if err := syscall.Mount(src, dst, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
-				return fmt.Errorf("child: failed to bind mount %s: %w", dir, err)
-			}
-			if err := syscall.Mount("", dst, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY, ""); err != nil {
-				return fmt.Errorf("child: failed to remount %s read-only: %w", dir, err)
-			}
-		}
+	if err := mountSystemDirs(targetRoot); err != nil {
+		return fmt.Errorf("child: failed to bind system dirs: %w", err)
 	}
 
-	// 4. Isolated writable /tmp
 	sandboxTmp := filepath.Join(targetRoot, "tmp")
 	if err := os.MkdirAll(sandboxTmp, 1777); err != nil {
 		return fmt.Errorf("child: failed to create sandbox /tmp: %w", err)
@@ -182,7 +212,6 @@ func InitChild(cfgJSON string) error {
 		return fmt.Errorf("child: failed to mount sandbox /tmp tmpfs: %w", err)
 	}
 
-	// 5. Chroot into the jail root
 	if err := syscall.Chroot(targetRoot); err != nil {
 		return fmt.Errorf("child: chroot failed: %w", err)
 	}
@@ -190,33 +219,12 @@ func InitChild(cfgJSON string) error {
 		return fmt.Errorf("child: chdir to / failed: %w", err)
 	}
 
-	// 6. Network initialization (keep lo alive, but egress disabled)
 	_ = configureLoopback()
 
-	// 7. Drop capabilities and enable PR_SET_NO_NEW_PRIVS
-	if err := DropCapabilities(); err != nil {
-		return fmt.Errorf("child: capability drop failed: %w", err)
+	if err := dropPrivileges(); err != nil {
+		return fmt.Errorf("child: privilege drop failed: %w", err)
 	}
 
-	// 8. Apply Seccomp BPF syscall filter
-	if err := ApplySeccompDenylist(); err != nil {
-		return fmt.Errorf("child: seccomp filter failed: %w", err)
-	}
-
-	// 9. Drop supplementary groups and drop user credentials to nobody (65534)
-	const unprivilegedUID = 65534
-	const unprivilegedGID = 65534
-	if err := syscall.Setgroups([]int{unprivilegedGID}); err != nil {
-		return fmt.Errorf("child: setgroups failed: %w", err)
-	}
-	if err := syscall.Setgid(unprivilegedGID); err != nil {
-		return fmt.Errorf("child: setgid failed: %w", err)
-	}
-	if err := syscall.Setuid(unprivilegedUID); err != nil {
-		return fmt.Errorf("child: setuid failed: %w", err)
-	}
-
-	// 10. Execute the requested binary
 	binaryPath, err := exec.LookPath(cfg.Command)
 	if err != nil {
 		return fmt.Errorf("child: command not found: %w", err)

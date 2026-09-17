@@ -39,9 +39,9 @@ func DropCapabilities() error {
 		return fmt.Errorf("failed to set PR_SET_NO_NEW_PRIVS: %w", err)
 	}
 
-	// Drop all bounding capabilities
-	for cap := 0; cap <= 63; cap++ {
-		_ = unix.Prctl(unix.PR_CAPBSET_DROP, uintptr(cap), 0, 0, 0)
+	// Drop all bounding capabilities without shadowing built-in cap()
+	for capID := 0; capID <= 63; capID++ {
+		_ = unix.Prctl(unix.PR_CAPBSET_DROP, uintptr(capID), 0, 0, 0)
 	}
 
 	return nil

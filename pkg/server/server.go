@@ -69,8 +69,8 @@ func (d *Daemon) Start() error {
 		return fmt.Errorf("failed to listen on unix socket %s: %w", d.socketPath, err)
 	}
 
-	// Allow unprivileged local users to write to the socket
-	if err := os.Chmod(d.socketPath, 0666); err != nil {
+	// Restrict permissions to owner and group read/write (0660) to prevent untrusted world access
+	if err := os.Chmod(d.socketPath, 0660); err != nil {
 		_ = listener.Close()
 		return fmt.Errorf("failed to set socket permissions: %w", err)
 	}
