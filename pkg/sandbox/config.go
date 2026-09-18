@@ -1,38 +1,31 @@
 package sandbox
 
-import (
-	"time"
-)
+import "time"
 
-// Config defines the security and resource limits for a sandbox instance.
-type Config struct {
-	// ID is the unique identifier for the execution sandbox.
-	ID string
-
-	// MemoryLimitBytes specifies the hard cgroup memory ceiling.
-	MemoryLimitBytes int64
-
-	// MaxProcesses sets the pids.max limit to prevent fork bombs.
-	MaxProcesses int64
-
-	// Timeout specifies the maximum wall-clock duration the process can run.
-	Timeout time.Duration
-
-	// Command is the binary to execute (e.g., "/usr/bin/python3", "/bin/sh").
-	Command string
-
-	// Args contains the arguments passed to the command.
-	Args []string
-
-	// Env specifies environment variables passed to the sandboxed process.
-	Env []string
+// ResourceMetrics contains accounting information collected from Cgroups v2.
+type ResourceMetrics struct {
+	PeakMemoryBytes int64 `json:"peak_memory_bytes"`
+	UserCPUTimeUS   int64 `json:"user_cpu_time_us"`
+	SystemCPUTimeUS int64 `json:"system_cpu_time_us"`
 }
 
-// Result captures the outcome of the sandboxed execution.
+// Config defines the constraints and execution parameters for a sandbox run.
+type Config struct {
+	ID               string        `json:"id"`
+	MemoryLimitBytes int64         `json:"memory_limit_bytes"`
+	MaxProcesses     int64         `json:"max_processes"`
+	Timeout          time.Duration `json:"timeout"`
+	Command          string        `json:"command"`
+	Args             []string      `json:"args"`
+	Env              []string      `json:"env"`
+}
+
+// Result holds standard output, errors, execution timings, and resource telemetry.
 type Result struct {
-	ExitCode int
-	Stdout   string
-	Stderr   string
-	Duration time.Duration
-	TimedOut bool
+	ExitCode int             `json:"exit_code"`
+	Stdout   string          `json:"stdout"`
+	Stderr   string          `json:"stderr"`
+	Duration time.Duration   `json:"duration"`
+	TimedOut bool            `json:"timed_out"`
+	Metrics  ResourceMetrics `json:"metrics"`
 }

@@ -1,11 +1,13 @@
 package sandbox
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -20,19 +22,15 @@ type CgroupController struct {
 
 // NewCgroupController creates a dedicated cgroup directory for a sandbox.
 func NewCgroupController(id string) (*CgroupController, error) {
-	// 1. Ensure the parent delegation subtree exists
 	if err := os.MkdirAll(gojailSubtree, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create base gojail cgroup: %w", err)
 	}
 
-	// 2. Delegate memory and pids controllers down the subtree
 	subtreeControl := filepath.Join(gojailSubtree, "cgroup.subtree_control")
-	if err := os.WriteFile(subtreeControl, []byte("+memory +pids"), 0644); err != nil {
-		// Non-fatal if controllers are already enabled
+	if err := os.WriteFile(subtreeControl, []byte("+memory +pids +cpu"), 0644); err != nil {
 		_ = err
 	}
 
-	// 3. Create unique isolated leaf cgroup for this execution
 	jailPath := filepath.Join(gojailSubtree, id)
 	if err := os.Mkdir(jailPath, 0755); err != nil && !os.IsExist(err) {
 		return nil, fmt.Errorf("failed to create sandbox cgroup %s: %w", id, err)
@@ -100,6 +98,43 @@ func (c *CgroupController) Thaw() error {
 		return fmt.Errorf("failed to thaw cgroup: %w", err)
 	}
 	return nil
+}
+
+// ReadMetrics parses resource usage statistics from the cgroup files.
+func (c *CgroupController) ReadMetrics() ResourceMetrics {
+	var metrics ResourceMetrics
+
+	// 1. Read peak memory usage; fallback to memory.current if memory.peak is absent
+	memData, err := os.ReadFile(filepath.Join(c.path, "memory.peak"))
+	if err != nil {
+		memData, _ = os.ReadFile(filepath.Join(c.path, "memory.current"))
+	}
+	if len(memData) > 0 {
+		val, parseErr := strconv.ParseInt(strings.TrimSpace(string(memData)), 10, 64)
+		if parseErr == nil {
+			metrics.PeakMemoryBytes = val
+		}
+	}
+
+	// 2. Read CPU stats from cpu.stat
+	cpuFile, err := os.Open(filepath.Join(c.path, "cpu.stat"))
+	if err == nil {
+		defer cpuFile.Close()
+		scanner := bufio.NewScanner(cpuFile)
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) == 2 {
+				switch fields[0] {
+				case "user_usec":
+					metrics.UserCPUTimeUS, _ = strconv.ParseInt(fields[1], 10, 64)
+				case "system_usec":
+					metrics.SystemCPUTimeUS, _ = strconv.ParseInt(fields[1], 10, 64)
+				}
+			}
+		}
+	}
+
+	return metrics
 }
 
 // Cleanup removes the ephemeral leaf cgroup, thawing first if frozen.

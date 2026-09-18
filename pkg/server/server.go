@@ -28,12 +28,13 @@ type Request struct {
 
 // Response defines the wire format returned by the daemon.
 type Response struct {
-	ExitCode int           `json:"exit_code"`
-	Stdout   string        `json:"stdout"`
-	Stderr   string        `json:"stderr"`
-	Duration time.Duration `json:"duration"`
-	TimedOut bool          `json:"timed_out"`
-	Error    string        `json:"error,omitempty"`
+	ExitCode int                     `json:"exit_code"`
+	Stdout   string                  `json:"stdout"`
+	Stderr   string                  `json:"stderr"`
+	Duration time.Duration           `json:"duration"`
+	TimedOut bool                    `json:"timed_out"`
+	Metrics  sandbox.ResourceMetrics `json:"metrics"`
+	Error    string                  `json:"error,omitempty"`
 }
 
 // Daemon represents the long-running gojaild server instance.
@@ -58,7 +59,6 @@ func NewDaemon(socketPath string) *Daemon {
 
 // Start creates the socket, warms up sandboxes, and begins accepting connections.
 func (d *Daemon) Start() error {
-	// Initialize warm pool with 2 pre-forked sandboxes
 	pool, err := sandbox.NewPool(2)
 	if err != nil {
 		return fmt.Errorf("failed to initialize warm pool: %w", err)
@@ -78,8 +78,6 @@ func (d *Daemon) Start() error {
 		return fmt.Errorf("failed to listen on unix socket %s: %w", d.socketPath, err)
 	}
 
-	// Permission 0666 allows non-root local clients to connect to the execution daemon.
-	// Untrusted payloads executed through this socket are isolated inside restricted unprivileged namespaces.
 	if err := os.Chmod(d.socketPath, 0666); err != nil {
 		_ = listener.Close()
 		return fmt.Errorf("failed to set socket permissions: %w", err)
@@ -138,13 +136,11 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), req.Timeout)
 	defer cancel()
 
-	// Extract inline script from arguments
 	script := strings.Join(req.Args, " ")
 	if len(req.Args) >= 2 && req.Args[0] == "-c" {
 		script = req.Args[1]
 	}
 
-	// Claim pre-warmed sandbox worker
 	worker, err := d.pool.Acquire()
 	if err != nil {
 		_ = encoder.Encode(Response{Error: fmt.Sprintf("worker acquire failed: %v", err)})
@@ -163,6 +159,7 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		Stderr:   res.Stderr,
 		Duration: res.Duration,
 		TimedOut: res.TimedOut,
+		Metrics:  res.Metrics,
 	})
 }
 

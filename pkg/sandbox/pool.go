@@ -78,7 +78,7 @@ func (p *Pool) spawnWorker() (*Worker, error) {
 	cfg := Config{
 		ID:      workerID,
 		Command: "/bin/sh",
-		Args:    []string{"-s"}, // Read instructions from stdin
+		Args:    []string{"-s"},
 		Env:     []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/tmp"},
 	}
 
@@ -120,7 +120,6 @@ func (p *Pool) spawnWorker() (*Worker, error) {
 		return nil, fmt.Errorf("failed to attach warm worker to cgroup: %w", err)
 	}
 
-	// Freeze worker in kernel space so it draws 0 CPU while waiting
 	if err := cg.Freeze(); err != nil {
 		_ = cmd.Process.Kill()
 		_ = stdinPipe.Close()
@@ -163,7 +162,7 @@ func (p *Pool) replenish() {
 	}
 }
 
-// Execute runs the command inside the warmed worker.
+// Execute runs the command inside the warmed worker and collects cgroup telemetry.
 func (w *Worker) Execute(ctx context.Context, script string) (*Result, error) {
 	defer func() {
 		_ = w.cgroup.Cleanup()
@@ -171,13 +170,11 @@ func (w *Worker) Execute(ctx context.Context, script string) (*Result, error) {
 
 	start := time.Now()
 
-	// Thaw the worker from the frozen kernel state
 	if err := w.cgroup.Thaw(); err != nil {
 		_ = w.cmd.Process.Kill()
 		return nil, fmt.Errorf("failed to thaw worker cgroup: %w", err)
 	}
 
-	// Feed payload into the warm shell and close stdin to signal execution end
 	if _, err := io.WriteString(w.stdin, script+"\nexit\n"); err != nil {
 		_ = w.cmd.Process.Kill()
 		return nil, fmt.Errorf("failed to write payload to warm worker: %w", err)
@@ -201,8 +198,11 @@ func (w *Worker) Execute(ctx context.Context, script string) (*Result, error) {
 	}
 
 	duration := time.Since(start)
-	exitCode := 0
 
+	// Collect resource metrics before cleanup defer runs
+	metrics := w.cgroup.ReadMetrics()
+
+	exitCode := 0
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
@@ -220,6 +220,7 @@ func (w *Worker) Execute(ctx context.Context, script string) (*Result, error) {
 		Stderr:   w.stderr.String(),
 		Duration: duration,
 		TimedOut: timedOut,
+		Metrics:  metrics,
 	}, nil
 }
 

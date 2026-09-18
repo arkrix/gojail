@@ -92,6 +92,7 @@ func (r *Runner) Run() (*Result, error) {
 	waitErr := cmd.Wait()
 	duration := time.Since(start)
 
+	metrics := cg.ReadMetrics()
 	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
 	exitCode := 0
 
@@ -116,6 +117,7 @@ func (r *Runner) Run() (*Result, error) {
 		Stderr:   stderrBuf.String(),
 		Duration: duration,
 		TimedOut: timedOut,
+		Metrics:  metrics,
 	}, nil
 }
 
@@ -151,6 +153,31 @@ func mountSystemDirs(targetRoot string) error {
 		}
 		if err := syscall.Mount("", dst, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY, ""); err != nil {
 			return fmt.Errorf("failed to remount %s read-only: %w", dir, err)
+		}
+	}
+	return nil
+}
+
+// mountDevNodes provisions basic device nodes (/dev/null, /dev/zero, /dev/urandom)
+func mountDevNodes(targetRoot string) error {
+	devPath := filepath.Join(targetRoot, "dev")
+	if err := os.MkdirAll(devPath, 0755); err != nil {
+		return fmt.Errorf("failed to mkdir /dev: %w", err)
+	}
+
+	devFiles := []string{"null", "zero", "urandom", "random"}
+	for _, f := range devFiles {
+		src := filepath.Join("/dev", f)
+		dst := filepath.Join(devPath, f)
+
+		touchFile, err := os.OpenFile(dst, os.O_CREATE|os.O_RDONLY, 0666)
+		if err != nil {
+			return fmt.Errorf("failed to touch %s: %w", dst, err)
+		}
+		_ = touchFile.Close()
+
+		if err := syscall.Mount(src, dst, "", syscall.MS_BIND, ""); err != nil {
+			return fmt.Errorf("failed to bind mount %s: %w", dst, err)
 		}
 	}
 	return nil
@@ -202,6 +229,10 @@ func InitChild(cfgJSON string) error {
 
 	if err := mountSystemDirs(targetRoot); err != nil {
 		return fmt.Errorf("child: failed to bind system dirs: %w", err)
+	}
+
+	if err := mountDevNodes(targetRoot); err != nil {
+		return fmt.Errorf("child: failed to mount dev nodes: %w", err)
 	}
 
 	sandboxTmp := filepath.Join(targetRoot, "tmp")

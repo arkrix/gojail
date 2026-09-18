@@ -11,7 +11,6 @@ import (
 )
 
 func main() {
-	// 1. High-priority internal hook for containerized init process
 	if len(os.Args) >= 3 && os.Args[1] == "__init_child__" {
 		if err := sandbox.InitChild(os.Args[2]); err != nil {
 			fmt.Fprintf(os.Stderr, "Error in child init: %v\n", err)
@@ -20,7 +19,6 @@ func main() {
 		return
 	}
 
-	// 2. Subcommand routing
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
@@ -35,7 +33,6 @@ func main() {
 		printUsage()
 		os.Exit(0)
 	default:
-		// Fallback for direct invocations if legacy flag syntax is used
 		handleDirectCommand(os.Args[1:])
 	}
 }
@@ -47,6 +44,7 @@ func handleRunCommand(args []string) {
 	timeoutSec := fs.Int("timeout", 5, "Execution timeout in seconds")
 	memMB := fs.Int64("mem", 128, "Memory ceiling in megabytes")
 	procsMax := fs.Int64("procs", 64, "Maximum allowed processes")
+	showMetrics := fs.Bool("metrics", false, "Print peak memory and CPU telemetry")
 	socketPath := fs.String("socket", "/var/run/gojail.sock", "Path to gojaild socket")
 
 	if err := fs.Parse(args); err != nil {
@@ -54,7 +52,6 @@ func handleRunCommand(args []string) {
 		os.Exit(1)
 	}
 
-	// Support both positional script syntax `gojail run "..."` and flag syntax `gojail run -c "..."`
 	scriptBody := *codeFlag
 	if scriptBody == "" && len(fs.Args()) > 0 {
 		scriptBody = fs.Args()[0]
@@ -98,6 +95,12 @@ func handleRunCommand(args []string) {
 		fmt.Fprintf(os.Stderr, "[gojail] Execution timed out after %v\n", resp.Duration)
 	}
 
+	if *showMetrics {
+		peakMB := float64(resp.Metrics.PeakMemoryBytes) / (1024 * 1024)
+		fmt.Fprintf(os.Stderr, "\n[Telemetry] Peak Memory: %.2f MB (%d B) | User CPU: %d µs | Sys CPU: %d µs | Wall: %v\n",
+			peakMB, resp.Metrics.PeakMemoryBytes, resp.Metrics.UserCPUTimeUS, resp.Metrics.SystemCPUTimeUS, resp.Duration)
+	}
+
 	os.Exit(resp.ExitCode)
 }
 
@@ -105,7 +108,7 @@ func handleDirectCommand(args []string) {
 	fs := flag.NewFlagSet("direct", flag.ExitOnError)
 	cmdFlag := fs.String("cmd", "/bin/sh", "Command binary to execute")
 	codeFlag := fs.String("c", "", "Inline command or script body")
-	timeoutSec := fs.Int("timeout", 5, "Timeout in seconds")
+	timeoutSec := fs.Int("timeout", 5, "Execution timeout in seconds")
 	memMB := fs.Int64("mem", 128, "Memory ceiling in megabytes")
 	procsMax := fs.Int64("procs", 32, "Maximum allowed processes")
 
@@ -159,5 +162,5 @@ func printUsage() {
 	fmt.Println("  direct   Execute command directly using root permissions (standalone mode)")
 	fmt.Println("\nExamples:")
 	fmt.Println("  gojail run \"echo 'Hello World'\"")
-	fmt.Println("  gojail run -mem 256 -timeout 3 \"python3 -c 'print(1+1)'\"")
+	fmt.Println("  gojail run -metrics \"python3 -c 'sum(range(1000000))'\"")
 }
