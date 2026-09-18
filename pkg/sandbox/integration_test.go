@@ -138,3 +138,22 @@ func TestIntegration_SeccompBlockSyscall(t *testing.T) {
 		t.Logf("output received: %s (exit code %d)", output, res.ExitCode)
 	}
 }
+
+func TestIntegration_CgroupFreezeThaw(t *testing.T) {
+	requireRoot(t)
+
+	testID := fmt.Sprintf("test-freeze-%d", time.Now().UnixNano())
+	cg, err := NewCgroupController(testID)
+	if err != nil {
+		t.Fatalf("failed to create cgroup controller: %v", err)
+	}
+	defer cg.Cleanup()
+
+	if err := cg.Freeze(); err != nil {
+		t.Fatalf("Freeze() failed: %v", err)
+	}
+
+	if err := cg.Thaw(); err != nil {
+		t.Fatalf("Thaw() failed: %v", err)
+	}
+}

@@ -1,16 +1,18 @@
 package sandbox
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 )
 
 const cgroupRoot = "/sys/fs/cgroup"
 const gojailSubtree = "/sys/fs/cgroup/gojail"
 
-// CgroupController manages cgroups v2 resource limits for a sandboxed execution.
+// CgroupController manages cgroups v2 resource limits and state for a sandbox.
 type CgroupController struct {
 	id   string
 	path string
@@ -70,8 +72,39 @@ func (c *CgroupController) AttachPID(pid int) error {
 	return nil
 }
 
-// Cleanup removes the ephemeral leaf cgroup.
+// Freeze writes 1 to cgroup.freeze and waits until cgroup.events confirms frozen=1.
+func (c *CgroupController) Freeze() error {
+	freezeFile := filepath.Join(c.path, "cgroup.freeze")
+	if err := os.WriteFile(freezeFile, []byte("1"), 0644); err != nil {
+		return fmt.Errorf("failed to write cgroup.freeze: %w", err)
+	}
+
+	eventsFile := filepath.Join(c.path, "cgroup.events")
+	deadline := time.Now().Add(500 * time.Millisecond)
+
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(eventsFile)
+		if err == nil && bytes.Contains(data, []byte("frozen 1")) {
+			return nil
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	return nil
+}
+
+// Thaw writes 0 to cgroup.freeze to wake all processes in the cgroup.
+func (c *CgroupController) Thaw() error {
+	freezeFile := filepath.Join(c.path, "cgroup.freeze")
+	if err := os.WriteFile(freezeFile, []byte("0"), 0644); err != nil {
+		return fmt.Errorf("failed to thaw cgroup: %w", err)
+	}
+	return nil
+}
+
+// Cleanup removes the ephemeral leaf cgroup, thawing first if frozen.
 func (c *CgroupController) Cleanup() error {
+	_ = c.Thaw()
 	if err := os.Remove(c.path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove cgroup %s: %w", c.path, err)
 	}

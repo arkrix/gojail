@@ -120,6 +120,14 @@ func (p *Pool) spawnWorker() (*Worker, error) {
 		return nil, fmt.Errorf("failed to attach warm worker to cgroup: %w", err)
 	}
 
+	// Freeze worker in kernel space so it draws 0 CPU while waiting
+	if err := cg.Freeze(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = stdinPipe.Close()
+		_ = cg.Cleanup()
+		return nil, fmt.Errorf("failed to freeze warm worker: %w", err)
+	}
+
 	return &Worker{
 		ID:     workerID,
 		cmd:    cmd,
@@ -134,11 +142,9 @@ func (p *Pool) spawnWorker() (*Worker, error) {
 func (p *Pool) Acquire() (*Worker, error) {
 	select {
 	case w := <-p.workers:
-		// Replenish the pool asynchronously
 		go p.replenish()
 		return w, nil
 	default:
-		// Pool exhausted; spawn on demand
 		return p.spawnWorker()
 	}
 }
@@ -164,6 +170,12 @@ func (w *Worker) Execute(ctx context.Context, script string) (*Result, error) {
 	}()
 
 	start := time.Now()
+
+	// Thaw the worker from the frozen kernel state
+	if err := w.cgroup.Thaw(); err != nil {
+		_ = w.cmd.Process.Kill()
+		return nil, fmt.Errorf("failed to thaw worker cgroup: %w", err)
+	}
 
 	// Feed payload into the warm shell and close stdin to signal execution end
 	if _, err := io.WriteString(w.stdin, script+"\nexit\n"); err != nil {
@@ -223,6 +235,7 @@ func (p *Pool) Close() {
 	close(p.workers)
 
 	for w := range p.workers {
+		_ = w.cgroup.Thaw()
 		_ = w.cmd.Process.Kill()
 		_ = w.cgroup.Cleanup()
 	}
