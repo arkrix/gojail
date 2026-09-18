@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arkrix/gojail/pkg/protocol"
 	"github.com/arkrix/gojail/pkg/server"
 )
 
@@ -25,7 +27,7 @@ func TestClient_Run(t *testing.T) {
 	}
 	defer listener.Close()
 
-	// Mock server worker
+	// Mock server that streams frames
 	go func() {
 		conn, acceptErr := listener.Accept()
 		if acceptErr != nil {
@@ -38,20 +40,22 @@ func TestClient_Run(t *testing.T) {
 			return
 		}
 
-		resp := server.Response{
+		fw := protocol.NewFrameWriter(conn)
+		_ = fw.WriteFrame(protocol.StreamStdout, []byte("echo: "+req.Command))
+		_ = fw.WriteExitFrame(protocol.ExitPayload{
 			ExitCode: 0,
-			Stdout:   "echo: " + req.Command,
 			Duration: 5 * time.Millisecond,
 			TimedOut: false,
-		}
-		_ = json.NewEncoder(conn).Encode(resp)
+		})
 	}()
 
+	var stdoutBuf bytes.Buffer
 	c := NewClient(sockPath)
 	res, err := c.Run(ExecOptions{
 		Command: "/bin/echo",
 		Args:    []string{"hello"},
 		Timeout: 2 * time.Second,
+		Stdout:  &stdoutBuf,
 	})
 	if err != nil {
 		t.Fatalf("client.Run failed: %v", err)
@@ -60,8 +64,8 @@ func TestClient_Run(t *testing.T) {
 	if res.ExitCode != 0 {
 		t.Errorf("expected exit code 0, got %d", res.ExitCode)
 	}
-	if res.Stdout != "echo: /bin/echo" {
-		t.Errorf("unexpected stdout: %s", res.Stdout)
+	if stdoutBuf.String() != "echo: /bin/echo" {
+		t.Errorf("unexpected stdout: %s", stdoutBuf.String())
 	}
 }
 

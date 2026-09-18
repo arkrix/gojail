@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,12 +15,12 @@ import (
 
 // Worker represents a pre-initialized sandbox worker waiting for input.
 type Worker struct {
-	ID     string
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bytes.Buffer
-	stderr *bytes.Buffer
-	cgroup *CgroupController
+	ID        string
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stdoutR   io.ReadCloser
+	stderrR   io.ReadCloser
+	cgroup    *CgroupController
 }
 
 // Pool maintains a standby pool of warmed sandbox processes.
@@ -103,12 +102,25 @@ func (p *Pool) spawnWorker() (*Worker, error) {
 		return nil, fmt.Errorf("failed to open stdin pipe: %w", err)
 	}
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdinPipe.Close()
+		_ = cg.Cleanup()
+		return nil, fmt.Errorf("failed to open stdout pipe: %w", err)
+	}
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdinPipe.Close()
+		_ = stdoutPipe.Close()
+		_ = cg.Cleanup()
+		return nil, fmt.Errorf("failed to open stderr pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		_ = stdinPipe.Close()
+		_ = stdoutPipe.Close()
+		_ = stderrPipe.Close()
 		_ = cg.Cleanup()
 		return nil, fmt.Errorf("failed to start warm worker: %w", err)
 	}
@@ -116,6 +128,8 @@ func (p *Pool) spawnWorker() (*Worker, error) {
 	if err := cg.AttachPID(cmd.Process.Pid); err != nil {
 		_ = cmd.Process.Kill()
 		_ = stdinPipe.Close()
+		_ = stdoutPipe.Close()
+		_ = stderrPipe.Close()
 		_ = cg.Cleanup()
 		return nil, fmt.Errorf("failed to attach warm worker to cgroup: %w", err)
 	}
@@ -123,17 +137,19 @@ func (p *Pool) spawnWorker() (*Worker, error) {
 	if err := cg.Freeze(); err != nil {
 		_ = cmd.Process.Kill()
 		_ = stdinPipe.Close()
+		_ = stdoutPipe.Close()
+		_ = stderrPipe.Close()
 		_ = cg.Cleanup()
 		return nil, fmt.Errorf("failed to freeze warm worker: %w", err)
 	}
 
 	return &Worker{
-		ID:     workerID,
-		cmd:    cmd,
-		stdin:  stdinPipe,
-		stdout: &stdoutBuf,
-		stderr: &stderrBuf,
-		cgroup: cg,
+		ID:      workerID,
+		cmd:     cmd,
+		stdin:   stdinPipe,
+		stdoutR: stdoutPipe,
+		stderrR: stderrPipe,
+		cgroup:  cg,
 	}, nil
 }
 
@@ -162,8 +178,14 @@ func (p *Pool) replenish() {
 	}
 }
 
-// Execute runs the command inside the warmed worker and collects cgroup telemetry.
-func (w *Worker) Execute(ctx context.Context, script string) (*Result, error) {
+// StreamHandler callbacks receive real-time stdout and stderr slices.
+type StreamHandler struct {
+	OnStdout func([]byte)
+	OnStderr func([]byte)
+}
+
+// ExecuteStream streams process output in real-time and reports final metrics.
+func (w *Worker) ExecuteStream(ctx context.Context, script string, handler StreamHandler) (*Result, error) {
 	defer func() {
 		_ = w.cgroup.Cleanup()
 	}()
@@ -181,6 +203,40 @@ func (w *Worker) Execute(ctx context.Context, script string) (*Result, error) {
 	}
 	_ = w.stdin.Close()
 
+	var streamWG sync.WaitGroup
+
+	// Real-time stdout streamer
+	streamWG.Add(1)
+	go func() {
+		defer streamWG.Done()
+		buf := make([]byte, 4096)
+		for {
+			n, rErr := w.stdoutR.Read(buf)
+			if n > 0 && handler.OnStdout != nil {
+				handler.OnStdout(buf[:n])
+			}
+			if rErr != nil {
+				break
+			}
+		}
+	}()
+
+	// Real-time stderr streamer
+	streamWG.Add(1)
+	go func() {
+		defer streamWG.Done()
+		buf := make([]byte, 4096)
+		for {
+			n, rErr := w.stderrR.Read(buf)
+			if n > 0 && handler.OnStderr != nil {
+				handler.OnStderr(buf[:n])
+			}
+			if rErr != nil {
+				break
+			}
+		}
+	}()
+
 	done := make(chan error, 1)
 	go func() {
 		done <- w.cmd.Wait()
@@ -197,9 +253,10 @@ func (w *Worker) Execute(ctx context.Context, script string) (*Result, error) {
 	case waitErr = <-done:
 	}
 
-	duration := time.Since(start)
+	// Wait for pipe buffers to completely flush before exiting
+	streamWG.Wait()
 
-	// Collect resource metrics before cleanup defer runs
+	duration := time.Since(start)
 	metrics := w.cgroup.ReadMetrics()
 
 	exitCode := 0
@@ -216,8 +273,6 @@ func (w *Worker) Execute(ctx context.Context, script string) (*Result, error) {
 
 	return &Result{
 		ExitCode: exitCode,
-		Stdout:   w.stdout.String(),
-		Stderr:   w.stderr.String(),
 		Duration: duration,
 		TimedOut: timedOut,
 		Metrics:  metrics,

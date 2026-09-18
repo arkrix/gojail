@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arkrix/gojail/pkg/protocol"
 	"github.com/arkrix/gojail/pkg/sandbox"
 )
 
@@ -24,17 +25,6 @@ type Request struct {
 	Timeout          time.Duration `json:"timeout"`
 	MemoryLimitBytes int64         `json:"memory_limit_bytes"`
 	MaxProcesses     int64         `json:"max_processes"`
-}
-
-// Response defines the wire format returned by the daemon.
-type Response struct {
-	ExitCode int                     `json:"exit_code"`
-	Stdout   string                  `json:"stdout"`
-	Stderr   string                  `json:"stderr"`
-	Duration time.Duration           `json:"duration"`
-	TimedOut bool                    `json:"timed_out"`
-	Metrics  sandbox.ResourceMetrics `json:"metrics"`
-	Error    string                  `json:"error,omitempty"`
 }
 
 // Daemon represents the long-running gojaild server instance.
@@ -84,7 +74,7 @@ func (d *Daemon) Start() error {
 	}
 
 	d.listener = listener
-	fmt.Printf("[gojaild] Listening on unix://%s (Warm Pool Ready)\n", d.socketPath)
+	fmt.Printf("[gojaild] Listening on unix://%s (Framed Streaming Ready)\n", d.socketPath)
 
 	d.wg.Add(1)
 	go d.acceptLoop()
@@ -118,13 +108,15 @@ func (d *Daemon) acceptLoop() {
 func (d *Daemon) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	decoder := json.NewDecoder(conn)
-	encoder := json.NewEncoder(conn)
+	frameWriter := protocol.NewFrameWriter(conn)
 
 	var req Request
-	if err := decoder.Decode(&req); err != nil {
+	if err := json.NewDecoder(conn).Decode(&req); err != nil {
 		if !errors.Is(err, io.EOF) {
-			_ = encoder.Encode(Response{Error: fmt.Sprintf("invalid request payload: %v", err)})
+			_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
+				ExitCode: 1,
+				Error:    fmt.Sprintf("invalid request payload: %v", err),
+			})
 		}
 		return
 	}
@@ -143,20 +135,38 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 
 	worker, err := d.pool.Acquire()
 	if err != nil {
-		_ = encoder.Encode(Response{Error: fmt.Sprintf("worker acquire failed: %v", err)})
+		_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
+			ExitCode: 1,
+			Error:    fmt.Sprintf("worker acquire failed: %v", err),
+		})
 		return
 	}
 
-	res, err := worker.Execute(ctx, script)
+	var writeMu sync.Mutex
+	handler := sandbox.StreamHandler{
+		OnStdout: func(chunk []byte) {
+			writeMu.Lock()
+			_ = frameWriter.WriteFrame(protocol.StreamStdout, chunk)
+			writeMu.Unlock()
+		},
+		OnStderr: func(chunk []byte) {
+			writeMu.Lock()
+			_ = frameWriter.WriteFrame(protocol.StreamStderr, chunk)
+			writeMu.Unlock()
+		},
+	}
+
+	res, err := worker.ExecuteStream(ctx, script, handler)
 	if err != nil {
-		_ = encoder.Encode(Response{Error: err.Error()})
+		_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
+			ExitCode: 1,
+			Error:    err.Error(),
+		})
 		return
 	}
 
-	_ = encoder.Encode(Response{
+	_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
 		ExitCode: res.ExitCode,
-		Stdout:   res.Stdout,
-		Stderr:   res.Stderr,
 		Duration: res.Duration,
 		TimedOut: res.TimedOut,
 		Metrics:  res.Metrics,

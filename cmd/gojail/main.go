@@ -71,6 +71,8 @@ func handleRunCommand(args []string) {
 		Timeout:          time.Duration(*timeoutSec) * time.Second,
 		MemoryLimitBytes: *memMB * 1024 * 1024,
 		MaxProcesses:     *procsMax,
+		Stdout:           os.Stdout,
+		Stderr:           os.Stderr,
 	}
 
 	resp, err := c.Run(opts)
@@ -82,13 +84,6 @@ func handleRunCommand(args []string) {
 	if resp.Error != "" {
 		fmt.Fprintf(os.Stderr, "[gojail] Execution rejected: %s\n", resp.Error)
 		os.Exit(1)
-	}
-
-	if resp.Stdout != "" {
-		fmt.Print(resp.Stdout)
-	}
-	if resp.Stderr != "" {
-		fmt.Fprint(os.Stderr, resp.Stderr)
 	}
 
 	if resp.TimedOut {
