@@ -1,0 +1,14 @@
+server:
+  socket_path: "/var/run/gojail.sock"
+  socket_mode: 0666
+
+pool:
+  warm_workers: 3
+
+defaults:
+  memory_limit_mb: 128
+  max_processes: 64
+  timeout_sec: 10
+
+storage:
+  cgroup_root: "/sys/fs/cgroup/gojail"

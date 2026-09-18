@@ -1,0 +1,26 @@
+[Unit]
+Description=GoJail Container Sandbox Daemon
+Documentation=https://github.com/arkrix/gojail
+After=network.target local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gojaild -config /etc/gojail/config.yaml
+Restart=on-failure
+RestartSec=3s
+KillMode=process
+TimeoutStopSec=10s
+
+# Sandboxing & Capabilities
+# Retain only the specific privileges needed for namespaces, cgroups, and seccomp
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_SYS_ADMIN CAP_SYS_CHROOT CAP_SETUID CAP_SETGID CAP_KILL CAP_DAC_OVERRIDE
+
+# Security restrictions on the daemon unit itself
+LimitNOFILE=65536
+LimitNPROC=4096
+TasksMax=8192
+
+[Install]
+WantedBy=multi-user.target

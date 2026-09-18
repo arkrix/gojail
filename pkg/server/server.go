@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/arkrix/gojail/pkg/config"
 	"github.com/arkrix/gojail/pkg/protocol"
 	"github.com/arkrix/gojail/pkg/sandbox"
 )
@@ -29,52 +30,64 @@ type Request struct {
 
 // Daemon represents the long-running gojaild server instance.
 type Daemon struct {
-	socketPath string
-	listener   net.Listener
-	shutdown   chan struct{}
-	wg         sync.WaitGroup
-	pool       *sandbox.Pool
+	cfg      *config.DaemonConfig
+	listener net.Listener
+	shutdown chan struct{}
+	wg       sync.WaitGroup
+	pool     *sandbox.Pool
 }
 
-// NewDaemon initializes a new Unix socket daemon with a warm pool.
-func NewDaemon(socketPath string) *Daemon {
-	if socketPath == "" {
-		socketPath = "/var/run/gojail.sock"
+// NewDaemon initializes a new Unix socket daemon driven by DaemonConfig.
+func NewDaemon(cfg *config.DaemonConfig) *Daemon {
+	if cfg == nil {
+		cfg = config.DefaultConfig()
 	}
 	return &Daemon{
-		socketPath: socketPath,
-		shutdown:   make(chan struct{}),
+		cfg:      cfg,
+		shutdown: make(chan struct{}),
 	}
 }
 
 // Start creates the socket, warms up sandboxes, and begins accepting connections.
 func (d *Daemon) Start() error {
-	pool, err := sandbox.NewPool(2)
+	poolSize := d.cfg.Pool.WarmWorkers
+	if poolSize <= 0 {
+		poolSize = 2
+	}
+
+	pool, err := sandbox.NewPool(poolSize)
 	if err != nil {
 		return fmt.Errorf("failed to initialize warm pool: %w", err)
 	}
 	d.pool = pool
 
-	if err := os.MkdirAll(filepath.Dir(d.socketPath), 0755); err != nil {
+	socketPath := d.cfg.Server.SocketPath
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
 	}
 
-	if err := os.Remove(d.socketPath); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove stale socket: %w", err)
 	}
 
-	listener, err := net.Listen("unix", d.socketPath)
+	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		return fmt.Errorf("failed to listen on unix socket %s: %w", d.socketPath, err)
+		return fmt.Errorf("failed to listen on unix socket %s: %w", socketPath, err)
 	}
 
-	if err := os.Chmod(d.socketPath, 0666); err != nil {
+	mode := os.FileMode(d.cfg.Server.SocketMode)
+	if mode == 0 {
+		mode = 0666
+	}
+
+	if err := os.Chmod(socketPath, mode); err != nil {
 		_ = listener.Close()
 		return fmt.Errorf("failed to set socket permissions: %w", err)
 	}
 
 	d.listener = listener
-	fmt.Printf("[gojaild] Listening on unix://%s (Framed Streaming Ready)\n", d.socketPath)
+	fmt.Printf("[gojaild] Listening on unix://%s (Pool: %d workers, Mode: %04o)\n",
+		socketPath, poolSize, mode)
 
 	d.wg.Add(1)
 	go d.acceptLoop()
@@ -122,7 +135,13 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	}
 
 	if req.Timeout == 0 {
-		req.Timeout = 10 * time.Second
+		req.Timeout = time.Duration(d.cfg.Defaults.TimeoutSec) * time.Second
+	}
+	if req.MemoryLimitBytes == 0 {
+		req.MemoryLimitBytes = d.cfg.Defaults.MemoryLimitMB * 1024 * 1024
+	}
+	if req.MaxProcesses == 0 {
+		req.MaxProcesses = d.cfg.Defaults.MaxProcesses
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), req.Timeout)
@@ -183,6 +202,6 @@ func (d *Daemon) Stop() {
 		d.pool.Close()
 	}
 	d.wg.Wait()
-	_ = os.Remove(d.socketPath)
+	_ = os.Remove(d.cfg.Server.SocketPath)
 	fmt.Println("[gojaild] Daemon stopped cleanly")
 }
