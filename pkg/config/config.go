@@ -29,14 +29,16 @@ type PoolConfig struct {
 
 // DefaultsConfig specifies fallback execution limits.
 type DefaultsConfig struct {
-	MemoryLimitMB int64 `yaml:"memory_limit_mb"`
-	MaxProcesses  int64 `yaml:"max_processes"`
-	TimeoutSec    int   `yaml:"timeout_sec"`
+	MemoryLimitMB  int64 `yaml:"memory_limit_mb"`
+	MaxProcesses   int64 `yaml:"max_processes"`
+	TimeoutSec     int   `yaml:"timeout_sec"`
+	StorageLimitMB int64 `yaml:"storage_limit_mb"`
 }
 
 // StorageConfig sets filesystem locations for sandbox operations.
 type StorageConfig struct {
 	CgroupRoot string `yaml:"cgroup_root"`
+	LayersDir  string `yaml:"layers_dir"`
 }
 
 // DefaultConfig returns sane production defaults.
@@ -50,12 +52,14 @@ func DefaultConfig() *DaemonConfig {
 			WarmWorkers: 2,
 		},
 		Defaults: DefaultsConfig{
-			MemoryLimitMB: 128,
-			MaxProcesses:  64,
-			TimeoutSec:    10,
+			MemoryLimitMB:  128,
+			MaxProcesses:   64,
+			TimeoutSec:     10,
+			StorageLimitMB: 64,
 		},
 		Storage: StorageConfig{
 			CgroupRoot: "/sys/fs/cgroup/gojail",
+			LayersDir:  "/run/gojail/layers",
 		},
 	}
 }
@@ -97,6 +101,10 @@ func LoadConfig(path string) (*DaemonConfig, error) {
 
 	if err := os.MkdirAll(filepath.Dir(cfg.Server.SocketPath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to ensure socket directory: %w", err)
+	}
+
+	if err := os.MkdirAll(cfg.Storage.LayersDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to ensure layers directory: %w", err)
 	}
 
 	return cfg, nil

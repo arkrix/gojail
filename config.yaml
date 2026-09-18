@@ -9,6 +9,9 @@ defaults:
   memory_limit_mb: 128
   max_processes: 64
   timeout_sec: 10
+  storage_limit_mb: 64
 
 storage:
   cgroup_root: "/sys/fs/cgroup/gojail"
+  layers_dir: "/run/gojail/layers"
+  

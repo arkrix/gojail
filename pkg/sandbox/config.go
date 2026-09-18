@@ -14,10 +14,12 @@ type Config struct {
 	ID               string        `json:"id"`
 	MemoryLimitBytes int64         `json:"memory_limit_bytes"`
 	MaxProcesses     int64         `json:"max_processes"`
+	StorageLimitMB   int64         `json:"storage_limit_mb"`
 	Timeout          time.Duration `json:"timeout"`
 	Command          string        `json:"command"`
 	Args             []string      `json:"args"`
 	Env              []string      `json:"env"`
+	RootPath         string        `json:"root_path,omitempty"`
 }
 
 // Result holds standard output, errors, execution timings, and resource telemetry.

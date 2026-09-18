@@ -32,6 +32,9 @@ func NewRunner(cfg Config) *Runner {
 	if cfg.MemoryLimitBytes == 0 {
 		cfg.MemoryLimitBytes = 128 * 1024 * 1024 // 128 MB default
 	}
+	if cfg.StorageLimitMB == 0 {
+		cfg.StorageLimitMB = 64
+	}
 
 	return &Runner{cfg: cfg}
 }
@@ -134,30 +137,6 @@ func configureLoopback() error {
 	return nil
 }
 
-// mountSystemDirs bind-mounts essential root directories as read-only.
-func mountSystemDirs(targetRoot string) error {
-	essentialDirs := []string{"bin", "lib", "lib64", "usr", "etc"}
-	for _, dir := range essentialDirs {
-		src := "/" + dir
-		fi, err := os.Stat(src)
-		if err != nil || !fi.IsDir() {
-			continue
-		}
-
-		dst := filepath.Join(targetRoot, dir)
-		if err := os.MkdirAll(dst, 0755); err != nil {
-			return fmt.Errorf("failed to mkdir %s: %w", dst, err)
-		}
-		if err := syscall.Mount(src, dst, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
-			return fmt.Errorf("failed to bind mount %s: %w", dir, err)
-		}
-		if err := syscall.Mount("", dst, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY, ""); err != nil {
-			return fmt.Errorf("failed to remount %s read-only: %w", dir, err)
-		}
-	}
-	return nil
-}
-
 // mountDevNodes provisions basic device nodes (/dev/null, /dev/zero, /dev/urandom)
 func mountDevNodes(targetRoot string) error {
 	devPath := filepath.Join(targetRoot, "dev")
@@ -213,38 +192,31 @@ func InitChild(cfgJSON string) error {
 		return fmt.Errorf("child: failed to parse config: %w", err)
 	}
 
+	// Make host mount table private to prevent leakage back to host
 	if err := syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("child: failed to make root private: %w", err)
 	}
 
-	targetRoot, err := os.MkdirTemp("", "gojail-root-*")
+	// Set up OverlayFS union mount
+	overlay, err := NewOverlayManager(cfg.ID, cfg.StorageLimitMB)
 	if err != nil {
-		return fmt.Errorf("child: failed to create jail root tempdir: %w", err)
+		return fmt.Errorf("child: overlay init failed: %w", err)
 	}
-	defer os.RemoveAll(targetRoot)
+	defer func() {
+		_ = overlay.Cleanup()
+	}()
 
-	if err := syscall.Mount("tmpfs", targetRoot, "tmpfs", 0, "size=64m"); err != nil {
-		return fmt.Errorf("child: failed to mount tmpfs root: %w", err)
-	}
-
-	if err := mountSystemDirs(targetRoot); err != nil {
-		return fmt.Errorf("child: failed to bind system dirs: %w", err)
+	targetRoot, err := overlay.Mount()
+	if err != nil {
+		return fmt.Errorf("child: overlay mount failed: %w", err)
 	}
 
 	if err := mountDevNodes(targetRoot); err != nil {
 		return fmt.Errorf("child: failed to mount dev nodes: %w", err)
 	}
 
-	sandboxTmp := filepath.Join(targetRoot, "tmp")
-	if err := os.MkdirAll(sandboxTmp, 1777); err != nil {
-		return fmt.Errorf("child: failed to create sandbox /tmp: %w", err)
-	}
-	if err := syscall.Mount("tmpfs", sandboxTmp, "tmpfs", 0, "size=32m"); err != nil {
-		return fmt.Errorf("child: failed to mount sandbox /tmp tmpfs: %w", err)
-	}
-
 	if err := syscall.Chroot(targetRoot); err != nil {
-		return fmt.Errorf("child: chroot failed: %w", err)
+		return fmt.Errorf("child: chroot to overlay failed: %w", err)
 	}
 	if err := os.Chdir("/"); err != nil {
 		return fmt.Errorf("child: chdir to / failed: %w", err)
