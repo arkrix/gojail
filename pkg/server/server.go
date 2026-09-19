@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/arkrix/gojail/pkg/config"
@@ -38,6 +39,7 @@ type Daemon struct {
 	shutdown chan struct{}
 	wg       sync.WaitGroup
 	pool     *sandbox.Pool
+	lockFile *os.File
 }
 
 // NewDaemon initializes a new Unix socket daemon driven by DaemonConfig.
@@ -51,8 +53,31 @@ func NewDaemon(cfg *config.DaemonConfig) *Daemon {
 	}
 }
 
-// Start creates the socket, warms up sandboxes with storage limits, and begins accepting connections.
+// Start acquires the daemon lock, executes crash recovery, warms sandboxes, and starts accepting requests.
 func (d *Daemon) Start() error {
+	// 1. Ensure single running daemon instance via advisory flock
+	lockFile, err := AcquireDaemonLock("/var/run/gojaild.pid")
+	if err != nil {
+		return fmt.Errorf("daemon start aborted: %w", err)
+	}
+	d.lockFile = lockFile
+
+	// 2. Perform crash recovery: sweep lingering mounts, scratch layers, and dead cgroups
+	if unmounted, err := SweepStaleMounts(defaultLayersDir); err != nil {
+		fmt.Fprintf(os.Stderr, "[recovery] Error sweeping mounts: %v\n", err)
+	} else if unmounted > 0 {
+		fmt.Printf("[recovery] Cleaned %d orphaned mount points from previous runs\n", unmounted)
+	}
+
+	if err := ResetLayersTree(defaultLayersDir); err != nil {
+		fmt.Fprintf(os.Stderr, "[recovery] Error resetting layers: %v\n", err)
+	}
+
+	if err := SweepStaleCgroups(); err != nil {
+		fmt.Fprintf(os.Stderr, "[recovery] Error sweeping cgroups: %v\n", err)
+	}
+
+	// 3. Initialize standby sandbox pool
 	poolSize := d.cfg.Pool.WarmWorkers
 	if poolSize <= 0 {
 		poolSize = 2
@@ -69,6 +94,7 @@ func (d *Daemon) Start() error {
 	}
 	d.pool = pool
 
+	// 4. Bind Unix domain socket
 	socketPath := d.cfg.Server.SocketPath
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
@@ -175,9 +201,7 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 
 	var writeMu sync.Mutex
 
-	// Interactive PTY Mode
 	if req.TTY {
-		// Goroutine reads frames from the client: StreamStdin, StreamResize
 		go func() {
 			for {
 				streamType, payload, rErr := frameReader.ReadFrame()
@@ -222,7 +246,6 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		return
 	}
 
-	// Batch Mode
 	script := strings.Join(req.Args, " ")
 	if len(req.Args) >= 2 && req.Args[0] == "-c" {
 		script = req.Args[1]
@@ -258,7 +281,7 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	})
 }
 
-// Stop gracefully shuts down the listener and active workers.
+// Stop gracefully terminates the listener, shuts down workers, and releases the PID lock.
 func (d *Daemon) Stop() {
 	close(d.shutdown)
 	if d.listener != nil {
@@ -269,5 +292,12 @@ func (d *Daemon) Stop() {
 	}
 	d.wg.Wait()
 	_ = os.Remove(d.cfg.Server.SocketPath)
+
+	if d.lockFile != nil {
+		_ = syscall.Flock(int(d.lockFile.Fd()), syscall.LOCK_UN)
+		_ = d.lockFile.Close()
+		_ = os.Remove("/var/run/gojaild.pid")
+	}
+
 	fmt.Println("[gojaild] Daemon stopped cleanly")
 }
