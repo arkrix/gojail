@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -179,6 +180,33 @@ func mountDevNodes(targetRoot string) error {
 	return nil
 }
 
+// applyCustomMounts bind-mounts requested host volumes into the container root.
+func applyCustomMounts(targetRoot string, mounts []MountSpec) error {
+	for _, m := range mounts {
+		cleanDst := strings.TrimPrefix(m.ContainerPath, "/")
+		fullDst := filepath.Join(targetRoot, cleanDst)
+
+		// Create target mount destination directory inside the overlay
+		if err := os.MkdirAll(fullDst, 0777); err != nil {
+			return fmt.Errorf("failed to create mount point %s: %w", fullDst, err)
+		}
+
+		// Initial bind mount
+		if err := syscall.Mount(m.HostPath, fullDst, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+			return fmt.Errorf("failed to bind mount %s to %s: %w", m.HostPath, fullDst, err)
+		}
+
+		// Remount read-only if requested
+		if m.ReadOnly {
+			flags := syscall.MS_BIND | syscall.MS_REMOUNT | syscall.MS_RDONLY | syscall.MS_REC
+			if err := syscall.Mount("", fullDst, "", uintptr(flags), ""); err != nil {
+				return fmt.Errorf("failed to remount %s read-only: %w", fullDst, err)
+			}
+		}
+	}
+	return nil
+}
+
 // dropPrivileges removes root capabilities and drops to nobody (65534).
 func dropPrivileges() error {
 	const unprivilegedUID = 65534
@@ -221,6 +249,11 @@ func InitChild(cfgJSON string) error {
 
 	if err := mountDevNodes(targetRoot); err != nil {
 		return fmt.Errorf("child: failed to mount dev nodes: %w", err)
+	}
+
+	// Bind-mount host volumes into container root prior to chroot
+	if err := applyCustomMounts(targetRoot, cfg.Mounts); err != nil {
+		return fmt.Errorf("child: failed to apply volume mounts: %w", err)
 	}
 
 	if err := syscall.Chroot(targetRoot); err != nil {

@@ -22,6 +22,7 @@ type ExecOptions struct {
 	MemoryLimitBytes int64
 	MaxProcesses     int64
 	StorageLimitMB   int64
+	Mounts           []sandbox.MountSpec
 	Stdout           io.Writer
 	Stderr           io.Writer
 }
@@ -64,13 +65,14 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 	}
 
 	req := struct {
-		Command          string        `json:"command"`
-		Args             []string      `json:"args"`
-		Env              []string      `json:"env"`
-		Timeout          time.Duration `json:"timeout"`
-		MemoryLimitBytes int64         `json:"memory_limit_bytes"`
-		MaxProcesses     int64         `json:"max_processes"`
-		StorageLimitMB   int64         `json:"storage_limit_mb"`
+		Command          string              `json:"command"`
+		Args             []string            `json:"args"`
+		Env              []string            `json:"env"`
+		Timeout          time.Duration       `json:"timeout"`
+		MemoryLimitBytes int64               `json:"memory_limit_bytes"`
+		MaxProcesses     int64               `json:"max_processes"`
+		StorageLimitMB   int64               `json:"storage_limit_mb"`
+		Mounts           []sandbox.MountSpec `json:"mounts,omitempty"`
 	}{
 		Command:          opts.Command,
 		Args:             opts.Args,
@@ -79,6 +81,7 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 		MemoryLimitBytes: opts.MemoryLimitBytes,
 		MaxProcesses:     opts.MaxProcesses,
 		StorageLimitMB:   opts.StorageLimitMB,
+		Mounts:           opts.Mounts,
 	}
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {

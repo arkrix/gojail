@@ -20,13 +20,14 @@ import (
 
 // Request defines the wire format sent by clients over the Unix socket.
 type Request struct {
-	Command          string        `json:"command"`
-	Args             []string      `json:"args"`
-	Env              []string      `json:"env"`
-	Timeout          time.Duration `json:"timeout"`
-	MemoryLimitBytes int64         `json:"memory_limit_bytes"`
-	MaxProcesses     int64         `json:"max_processes"`
-	StorageLimitMB   int64         `json:"storage_limit_mb"`
+	Command          string              `json:"command"`
+	Args             []string            `json:"args"`
+	Env              []string            `json:"env"`
+	Timeout          time.Duration       `json:"timeout"`
+	MemoryLimitBytes int64               `json:"memory_limit_bytes"`
+	MaxProcesses     int64               `json:"max_processes"`
+	StorageLimitMB   int64               `json:"storage_limit_mb"`
+	Mounts           []sandbox.MountSpec `json:"mounts,omitempty"`
 }
 
 // Daemon represents the long-running gojaild server instance.
@@ -161,8 +162,8 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		script = req.Args[1]
 	}
 
-	// Use AcquireWithStorage to support custom storage quotas dynamically
-	worker, err := d.pool.AcquireWithStorage(req.StorageLimitMB)
+	// Use AcquireCustom to dynamically supply custom storage limits and bind mounts
+	worker, err := d.pool.AcquireCustom(req.StorageLimitMB, req.Mounts)
 	if err != nil {
 		_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
 			ExitCode: 1,

@@ -55,7 +55,7 @@ func NewPoolWithStorage(capacity int, storageLimitMB int64) (*Pool, error) {
 	}
 
 	for i := 0; i < capacity; i++ {
-		w, err := p.spawnWorker(p.storageLimitMB)
+		w, err := p.spawnWorker(p.storageLimitMB, nil)
 		if err != nil {
 			p.Close()
 			return nil, fmt.Errorf("failed to prefill warm pool: %w", err)
@@ -67,7 +67,7 @@ func NewPoolWithStorage(capacity int, storageLimitMB int64) (*Pool, error) {
 }
 
 // spawnWorker creates an isolated, pre-jailed child ready to accept commands.
-func (p *Pool) spawnWorker(storageMB int64) (*Worker, error) {
+func (p *Pool) spawnWorker(storageMB int64, mounts []MountSpec) (*Worker, error) {
 	workerID := fmt.Sprintf("warm-%d", time.Now().UnixNano())
 
 	// 1. Provision OverlayFS layer for this warm worker with explicit storage quota
@@ -109,6 +109,7 @@ func (p *Pool) spawnWorker(storageMB int64) (*Worker, error) {
 		Env:            []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/tmp"},
 		StorageLimitMB: storageMB,
 		RootPath:       targetRoot,
+		Mounts:         mounts,
 	}
 
 	cfgBytes, err := json.Marshal(cfg)
@@ -194,28 +195,33 @@ func (p *Pool) spawnWorker(storageMB int64) (*Worker, error) {
 
 // Acquire pulls an idle worker from the pool or spawns a fallback.
 func (p *Pool) Acquire() (*Worker, error) {
-	return p.AcquireWithStorage(p.storageLimitMB)
+	return p.AcquireCustom(p.storageLimitMB, nil)
 }
 
-// AcquireWithStorage checks if a warm worker matches the requested storage; otherwise spawns a custom one.
+// AcquireWithStorage delegates to AcquireCustom with nil mounts.
 func (p *Pool) AcquireWithStorage(requestedMB int64) (*Worker, error) {
+	return p.AcquireCustom(requestedMB, nil)
+}
+
+// AcquireCustom returns a warm worker if specs match defaults, or spawns an on-demand custom worker.
+func (p *Pool) AcquireCustom(requestedMB int64, mounts []MountSpec) (*Worker, error) {
 	if requestedMB <= 0 {
 		requestedMB = p.storageLimitMB
 	}
 
-	// If requested size matches the pool's default, pop from warm pool
-	if requestedMB == p.storageLimitMB {
+	// If no custom mounts and storage matches default, pull from warm pool
+	if len(mounts) == 0 && requestedMB == p.storageLimitMB {
 		select {
 		case w := <-p.workers:
 			go p.replenish()
 			return w, nil
 		default:
-			return p.spawnWorker(requestedMB)
+			return p.spawnWorker(requestedMB, nil)
 		}
 	}
 
-	// Dynamic custom storage quota: spawn custom worker on demand
-	return p.spawnWorker(requestedMB)
+	// Custom mounts or custom storage: spawn on demand
+	return p.spawnWorker(requestedMB, mounts)
 }
 
 func (p *Pool) replenish() {
@@ -226,7 +232,7 @@ func (p *Pool) replenish() {
 		return
 	}
 
-	w, err := p.spawnWorker(p.storageLimitMB)
+	w, err := p.spawnWorker(p.storageLimitMB, nil)
 	if err == nil {
 		p.workers <- w
 	}

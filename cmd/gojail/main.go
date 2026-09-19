@@ -10,6 +10,29 @@ import (
 	"github.com/arkrix/gojail/pkg/sandbox"
 )
 
+type volumeFlags []string
+
+func (v *volumeFlags) String() string {
+	return fmt.Sprint(*v)
+}
+
+func (v *volumeFlags) Set(value string) error {
+	*v = append(*v, value)
+	return nil
+}
+
+func parseMounts(rawMounts []string) ([]sandbox.MountSpec, error) {
+	var specs []sandbox.MountSpec
+	for _, m := range rawMounts {
+		spec, err := sandbox.ParseMountSpec(m)
+		if err != nil {
+			return nil, err
+		}
+		specs = append(specs, *spec)
+	}
+	return specs, nil
+}
+
 func main() {
 	if len(os.Args) >= 3 && os.Args[1] == "__init_child__" {
 		if err := sandbox.InitChild(os.Args[2]); err != nil {
@@ -48,8 +71,18 @@ func handleRunCommand(args []string) {
 	showMetrics := fs.Bool("metrics", false, "Print peak memory and CPU telemetry")
 	socketPath := fs.String("socket", "/var/run/gojail.sock", "Path to gojaild socket")
 
+	var volumes volumeFlags
+	fs.Var(&volumes, "v", "Volume bind mount: host_dir:jail_target[:ro|rw]")
+	fs.Var(&volumes, "volume", "Volume bind mount: host_dir:jail_target[:ro|rw]")
+
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
+		os.Exit(1)
+	}
+
+	mountSpecs, err := parseMounts(volumes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error in volume specification: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -60,7 +93,7 @@ func handleRunCommand(args []string) {
 
 	if scriptBody == "" {
 		fmt.Println("Error: must provide a command body or script to execute")
-		fmt.Println("Example: gojail run \"echo hello\"")
+		fmt.Println("Example: gojail run -v /tmp/data:/data:ro \"ls -la /data\"")
 		os.Exit(1)
 	}
 
@@ -73,6 +106,7 @@ func handleRunCommand(args []string) {
 		MemoryLimitBytes: *memMB * 1024 * 1024,
 		MaxProcesses:     *procsMax,
 		StorageLimitMB:   *storageMB,
+		Mounts:           mountSpecs,
 		Stdout:           os.Stdout,
 		Stderr:           os.Stderr,
 	}
@@ -110,8 +144,18 @@ func handleDirectCommand(args []string) {
 	procsMax := fs.Int64("procs", 32, "Maximum allowed processes")
 	storageMB := fs.Int64("storage", 64, "Storage ceiling in megabytes")
 
+	var volumes volumeFlags
+	fs.Var(&volumes, "v", "Volume bind mount: host_dir:jail_target[:ro|rw]")
+	fs.Var(&volumes, "volume", "Volume bind mount: host_dir:jail_target[:ro|rw]")
+
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
+		os.Exit(1)
+	}
+
+	mountSpecs, err := parseMounts(volumes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error in volume specification: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -135,6 +179,7 @@ func handleDirectCommand(args []string) {
 		Command:          *cmdFlag,
 		Args:             []string{"-c", scriptBody},
 		Env:              []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/tmp"},
+		Mounts:           mountSpecs,
 	}
 
 	runner := sandbox.NewRunner(cfg)
@@ -160,6 +205,7 @@ func printUsage() {
 	fmt.Println("  run      Execute command via the background daemon (gojaild)")
 	fmt.Println("  direct   Execute command directly using root permissions (standalone mode)")
 	fmt.Println("\nOptions for run:")
+	fmt.Println("  -v, --volume   Bind mount: host:target[:ro|rw] (can be specified multiple times)")
 	fmt.Println("  -mem int       Memory ceiling in MB (default 128)")
 	fmt.Println("  -procs int     Max processes (default 64)")
 	fmt.Println("  -storage int   Scratch storage ceiling in MB (default 64)")
