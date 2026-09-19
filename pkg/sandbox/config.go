@@ -81,6 +81,7 @@ type Config struct {
 	Args             []string      `json:"args"`
 	Env              []string      `json:"env"`
 	RootPath         string        `json:"root_path,omitempty"`
+	Rootfs           string        `json:"rootfs,omitempty"`
 	Mounts           []MountSpec   `json:"mounts,omitempty"`
 	TTY              bool          `json:"tty,omitempty"`
 }

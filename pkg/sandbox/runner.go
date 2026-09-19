@@ -155,7 +155,7 @@ func configureLoopback() error {
 	return nil
 }
 
-// mountDevNodes provisions essential device nodes (/dev/null, /dev/zero, /dev/urandom, /dev/tty) and /dev/pts
+// mountDevNodes provisions essential device nodes and mounts devpts inside targetRoot.
 func mountDevNodes(targetRoot string) error {
 	devPath := filepath.Join(targetRoot, "dev")
 	if err := os.MkdirAll(devPath, 0755); err != nil {
@@ -182,18 +182,15 @@ func mountDevNodes(targetRoot string) error {
 		}
 	}
 
-	// Mount isolated devpts for interactive PTY allocations
 	ptsPath := filepath.Join(devPath, "pts")
 	if err := os.MkdirAll(ptsPath, 0755); err != nil {
 		return fmt.Errorf("failed to mkdir /dev/pts: %w", err)
 	}
 	ptsOpts := "newinstance,ptmxmode=0666,mode=0620"
 	if err := syscall.Mount("devpts", ptsPath, "devpts", 0, ptsOpts); err != nil {
-		// Fallback: bind mount host /dev/pts if newinstance is restricted
 		_ = syscall.Mount("/dev/pts", ptsPath, "", syscall.MS_BIND, "")
 	}
 
-	// Symlink /dev/ptmx -> pts/ptmx if missing
 	ptmxTarget := filepath.Join(devPath, "ptmx")
 	if _, err := os.Lstat(ptmxTarget); os.IsNotExist(err) {
 		_ = os.Symlink("pts/ptmx", ptmxTarget)
@@ -223,6 +220,40 @@ func applyCustomMounts(targetRoot string, mounts []MountSpec) error {
 			}
 		}
 	}
+	return nil
+}
+
+// pivotRoot executes pivot_root to replace the root filesystem and unmount old root.
+func pivotRoot(newRoot string) error {
+	// Ensure newRoot is a mountpoint by bind-mounting onto itself
+	if err := syscall.Mount(newRoot, newRoot, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+		return fmt.Errorf("failed to bind-mount new root %s onto itself: %w", newRoot, err)
+	}
+
+	oldRoot := filepath.Join(newRoot, ".oldroot")
+	if err := os.MkdirAll(oldRoot, 0700); err != nil {
+		return fmt.Errorf("failed to create oldroot dir %s: %w", oldRoot, err)
+	}
+
+	// Pivot root filesystem via unix.PivotRoot
+	if err := unix.PivotRoot(newRoot, oldRoot); err != nil {
+		return fmt.Errorf("unix pivot_root failed: %w", err)
+	}
+
+	// Switch working directory to the new root
+	if err := os.Chdir("/"); err != nil {
+		return fmt.Errorf("chdir / after pivot_root failed: %w", err)
+	}
+
+	// Detach and unmount the old host root
+	oldRootPath := "/.oldroot"
+	if err := syscall.Unmount(oldRootPath, syscall.MNT_DETACH); err != nil {
+		return fmt.Errorf("failed to unmount old root %s: %w", oldRootPath, err)
+	}
+
+	// Remove the temporary mount point directory
+	_ = os.Remove(oldRootPath)
+
 	return nil
 }
 
@@ -274,11 +305,9 @@ func InitChild(cfgJSON string) error {
 		return fmt.Errorf("child: failed to apply volume mounts: %w", err)
 	}
 
-	if err := syscall.Chroot(targetRoot); err != nil {
-		return fmt.Errorf("child: chroot to overlay failed: %w", err)
-	}
-	if err := os.Chdir("/"); err != nil {
-		return fmt.Errorf("child: chdir to / failed: %w", err)
+	// Enforce true root isolation via pivot_root
+	if err := pivotRoot(targetRoot); err != nil {
+		return fmt.Errorf("child: pivot_root failed: %w", err)
 	}
 
 	_ = configureLoopback()
