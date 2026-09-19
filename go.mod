@@ -2,6 +2,9 @@ module github.com/arkrix/gojail
 
 go 1.26.5
 
-require golang.org/x/sys v0.48.0
-
-require gopkg.in/yaml.v3 v3.0.1 // indirect
+require (
+	github.com/creack/pty v1.1.24
+	golang.org/x/sys v0.48.0
+	golang.org/x/term v0.29.0
+	gopkg.in/yaml.v3 v3.0.1
+)

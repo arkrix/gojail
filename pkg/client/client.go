@@ -7,10 +7,13 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/arkrix/gojail/pkg/protocol"
 	"github.com/arkrix/gojail/pkg/sandbox"
+	"golang.org/x/term"
 )
 
 // ExecOptions defines the parameters sent to the daemon.
@@ -23,6 +26,7 @@ type ExecOptions struct {
 	MaxProcesses     int64
 	StorageLimitMB   int64
 	Mounts           []sandbox.MountSpec
+	TTY              bool
 	Stdout           io.Writer
 	Stderr           io.Writer
 }
@@ -49,7 +53,7 @@ func NewClient(socketPath string) *Client {
 	return &Client{socketPath: socketPath}
 }
 
-// Run executes the command via gojaild and streams stdout/stderr directly.
+// Run executes the command via gojaild and streams I/O directly.
 func (c *Client) Run(opts ExecOptions) (*Response, error) {
 	conn, err := net.Dial("unix", c.socketPath)
 	if err != nil {
@@ -73,6 +77,7 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 		MaxProcesses     int64               `json:"max_processes"`
 		StorageLimitMB   int64               `json:"storage_limit_mb"`
 		Mounts           []sandbox.MountSpec `json:"mounts,omitempty"`
+		TTY              bool                `json:"tty,omitempty"`
 	}{
 		Command:          opts.Command,
 		Args:             opts.Args,
@@ -82,15 +87,61 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 		MaxProcesses:     opts.MaxProcesses,
 		StorageLimitMB:   opts.StorageLimitMB,
 		Mounts:           opts.Mounts,
+		TTY:              opts.TTY,
 	}
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
-	reader := protocol.NewFrameReader(conn)
+	frameWriter := protocol.NewFrameWriter(conn)
+	frameReader := protocol.NewFrameReader(conn)
+
+	// If interactive TTY requested, configure raw mode and forward stdin + window resizes
+	if opts.TTY && term.IsTerminal(int(os.Stdin.Fd())) {
+		oldState, rErr := term.MakeRaw(int(os.Stdin.Fd()))
+		if rErr == nil {
+			defer func() {
+				_ = term.Restore(int(os.Stdin.Fd()), oldState)
+			}()
+		}
+
+		// Initial window size
+		if width, height, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+			_ = frameWriter.WriteFrame(protocol.StreamResize, protocol.EncodeWindowSize(uint16(height), uint16(width)))
+		}
+
+		// Watch SIGWINCH for window resizes
+		sigwinch := make(chan os.Signal, 1)
+		signal.Notify(sigwinch, syscall.SIGWINCH)
+		defer signal.Stop(sigwinch)
+
+		go func() {
+			for range sigwinch {
+				if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+					_ = frameWriter.WriteFrame(protocol.StreamResize, protocol.EncodeWindowSize(uint16(h), uint16(w)))
+				}
+			}
+		}()
+
+		// Pump os.Stdin -> StreamStdin frames
+		go func() {
+			buf := make([]byte, 1024)
+			for {
+				n, err := os.Stdin.Read(buf)
+				if n > 0 {
+					_ = frameWriter.WriteFrame(protocol.StreamStdin, buf[:n])
+				}
+				if err != nil {
+					break
+				}
+			}
+		}()
+	}
+
+	// Read responses from daemon
 	for {
-		streamType, payload, rErr := reader.ReadFrame()
+		streamType, payload, rErr := frameReader.ReadFrame()
 		if rErr != nil {
 			if errors.Is(rErr, io.EOF) {
 				break

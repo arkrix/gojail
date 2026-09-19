@@ -82,6 +82,7 @@ type Config struct {
 	Env              []string      `json:"env"`
 	RootPath         string        `json:"root_path,omitempty"`
 	Mounts           []MountSpec   `json:"mounts,omitempty"`
+	TTY              bool          `json:"tty,omitempty"`
 }
 
 // Result holds standard output, errors, execution timings, and resource telemetry.

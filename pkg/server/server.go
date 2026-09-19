@@ -28,6 +28,7 @@ type Request struct {
 	MaxProcesses     int64               `json:"max_processes"`
 	StorageLimitMB   int64               `json:"storage_limit_mb"`
 	Mounts           []sandbox.MountSpec `json:"mounts,omitempty"`
+	TTY              bool                `json:"tty,omitempty"`
 }
 
 // Daemon represents the long-running gojaild server instance.
@@ -129,6 +130,7 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	frameWriter := protocol.NewFrameWriter(conn)
+	frameReader := protocol.NewFrameReader(conn)
 
 	var req Request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
@@ -157,13 +159,12 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), req.Timeout)
 	defer cancel()
 
-	script := strings.Join(req.Args, " ")
-	if len(req.Args) >= 2 && req.Args[0] == "-c" {
-		script = req.Args[1]
+	initialCmd := []string{req.Command}
+	if len(req.Args) > 0 {
+		initialCmd = append(initialCmd, req.Args...)
 	}
 
-	// Use AcquireCustom to dynamically supply custom storage limits and bind mounts
-	worker, err := d.pool.AcquireCustom(req.StorageLimitMB, req.Mounts)
+	worker, err := d.pool.AcquireCustom(req.StorageLimitMB, req.Mounts, req.TTY, initialCmd)
 	if err != nil {
 		_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
 			ExitCode: 1,
@@ -173,6 +174,60 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	}
 
 	var writeMu sync.Mutex
+
+	// Interactive PTY Mode
+	if req.TTY {
+		// Goroutine reads frames from the client: StreamStdin, StreamResize
+		go func() {
+			for {
+				streamType, payload, rErr := frameReader.ReadFrame()
+				if rErr != nil {
+					break
+				}
+				switch streamType {
+				case protocol.StreamStdin:
+					_ = worker.WriteInput(payload)
+				case protocol.StreamResize:
+					ws, pErr := protocol.ParseWindowSize(payload)
+					if pErr == nil {
+						_ = worker.Resize(ws.Rows, ws.Cols)
+					}
+				}
+			}
+		}()
+
+		ptyHandler := sandbox.PTYIOHandler{
+			OnOutput: func(chunk []byte) {
+				writeMu.Lock()
+				_ = frameWriter.WriteFrame(protocol.StreamStdout, chunk)
+				writeMu.Unlock()
+			},
+		}
+
+		res, ptyErr := worker.ExecutePTY(ctx, ptyHandler)
+		if ptyErr != nil {
+			_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
+				ExitCode: 1,
+				Error:    ptyErr.Error(),
+			})
+			return
+		}
+
+		_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
+			ExitCode: res.ExitCode,
+			Duration: res.Duration,
+			TimedOut: res.TimedOut,
+			Metrics:  res.Metrics,
+		})
+		return
+	}
+
+	// Batch Mode
+	script := strings.Join(req.Args, " ")
+	if len(req.Args) >= 2 && req.Args[0] == "-c" {
+		script = req.Args[1]
+	}
+
 	handler := sandbox.StreamHandler{
 		OnStdout: func(chunk []byte) {
 			writeMu.Lock()

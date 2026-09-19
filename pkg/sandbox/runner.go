@@ -155,17 +155,21 @@ func configureLoopback() error {
 	return nil
 }
 
-// mountDevNodes provisions basic device nodes (/dev/null, /dev/zero, /dev/urandom)
+// mountDevNodes provisions essential device nodes (/dev/null, /dev/zero, /dev/urandom, /dev/tty) and /dev/pts
 func mountDevNodes(targetRoot string) error {
 	devPath := filepath.Join(targetRoot, "dev")
 	if err := os.MkdirAll(devPath, 0755); err != nil {
 		return fmt.Errorf("failed to mkdir /dev: %w", err)
 	}
 
-	devFiles := []string{"null", "zero", "urandom", "random"}
+	devFiles := []string{"null", "zero", "urandom", "random", "tty"}
 	for _, f := range devFiles {
 		src := filepath.Join("/dev", f)
 		dst := filepath.Join(devPath, f)
+
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			continue
+		}
 
 		touchFile, err := os.OpenFile(dst, os.O_CREATE|os.O_RDONLY, 0666)
 		if err != nil {
@@ -177,6 +181,24 @@ func mountDevNodes(targetRoot string) error {
 			return fmt.Errorf("failed to bind mount %s: %w", dst, err)
 		}
 	}
+
+	// Mount isolated devpts for interactive PTY allocations
+	ptsPath := filepath.Join(devPath, "pts")
+	if err := os.MkdirAll(ptsPath, 0755); err != nil {
+		return fmt.Errorf("failed to mkdir /dev/pts: %w", err)
+	}
+	ptsOpts := "newinstance,ptmxmode=0666,mode=0620"
+	if err := syscall.Mount("devpts", ptsPath, "devpts", 0, ptsOpts); err != nil {
+		// Fallback: bind mount host /dev/pts if newinstance is restricted
+		_ = syscall.Mount("/dev/pts", ptsPath, "", syscall.MS_BIND, "")
+	}
+
+	// Symlink /dev/ptmx -> pts/ptmx if missing
+	ptmxTarget := filepath.Join(devPath, "ptmx")
+	if _, err := os.Lstat(ptmxTarget); os.IsNotExist(err) {
+		_ = os.Symlink("pts/ptmx", ptmxTarget)
+	}
+
 	return nil
 }
 
@@ -186,17 +208,14 @@ func applyCustomMounts(targetRoot string, mounts []MountSpec) error {
 		cleanDst := strings.TrimPrefix(m.ContainerPath, "/")
 		fullDst := filepath.Join(targetRoot, cleanDst)
 
-		// Create target mount destination directory inside the overlay
 		if err := os.MkdirAll(fullDst, 0777); err != nil {
 			return fmt.Errorf("failed to create mount point %s: %w", fullDst, err)
 		}
 
-		// Initial bind mount
 		if err := syscall.Mount(m.HostPath, fullDst, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
 			return fmt.Errorf("failed to bind mount %s to %s: %w", m.HostPath, fullDst, err)
 		}
 
-		// Remount read-only if requested
 		if m.ReadOnly {
 			flags := syscall.MS_BIND | syscall.MS_REMOUNT | syscall.MS_RDONLY | syscall.MS_REC
 			if err := syscall.Mount("", fullDst, "", uintptr(flags), ""); err != nil {
@@ -251,7 +270,6 @@ func InitChild(cfgJSON string) error {
 		return fmt.Errorf("child: failed to mount dev nodes: %w", err)
 	}
 
-	// Bind-mount host volumes into container root prior to chroot
 	if err := applyCustomMounts(targetRoot, cfg.Mounts); err != nil {
 		return fmt.Errorf("child: failed to apply volume mounts: %w", err)
 	}

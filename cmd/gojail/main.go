@@ -61,21 +61,33 @@ func main() {
 }
 
 func handleRunCommand(args []string) {
+	// Pre-process args to expand "-it" into "-i" and "-t" if present
+	var normalizedArgs []string
+	for _, a := range args {
+		if a == "-it" {
+			normalizedArgs = append(normalizedArgs, "-i", "-t")
+		} else {
+			normalizedArgs = append(normalizedArgs, a)
+		}
+	}
+
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cmdFlag := fs.String("cmd", "/bin/sh", "Command binary to execute")
 	codeFlag := fs.String("c", "", "Inline command or script body")
-	timeoutSec := fs.Int("timeout", 5, "Execution timeout in seconds")
+	timeoutSec := fs.Int("timeout", 0, "Execution timeout in seconds (0 = 1 hour for interactive)")
 	memMB := fs.Int64("mem", 128, "Memory ceiling in megabytes")
 	procsMax := fs.Int64("procs", 64, "Maximum allowed processes")
 	storageMB := fs.Int64("storage", 64, "Scratch storage ceiling in megabytes")
 	showMetrics := fs.Bool("metrics", false, "Print peak memory and CPU telemetry")
 	socketPath := fs.String("socket", "/var/run/gojail.sock", "Path to gojaild socket")
+	interactive := fs.Bool("i", false, "Keep STDIN open")
+	tty := fs.Bool("t", false, "Allocate a pseudo-TTY")
 
 	var volumes volumeFlags
 	fs.Var(&volumes, "v", "Volume bind mount: host_dir:jail_target[:ro|rw]")
 	fs.Var(&volumes, "volume", "Volume bind mount: host_dir:jail_target[:ro|rw]")
 
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(normalizedArgs); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
 		os.Exit(1)
 	}
@@ -86,44 +98,67 @@ func handleRunCommand(args []string) {
 		os.Exit(1)
 	}
 
+	isInteractive := *interactive && *tty
+	targetCmd := *cmdFlag
+	var targetArgs []string
+
 	scriptBody := *codeFlag
-	if scriptBody == "" && len(fs.Args()) > 0 {
-		scriptBody = fs.Args()[0]
+	remaining := fs.Args()
+
+	if isInteractive {
+		if len(remaining) > 0 {
+			targetCmd = remaining[0]
+			targetArgs = remaining[1:]
+		} else if scriptBody != "" {
+			targetArgs = []string{"-c", scriptBody}
+		} else {
+			targetCmd = "/bin/sh"
+			targetArgs = []string{"-i"}
+		}
+	} else {
+		if scriptBody == "" && len(remaining) > 0 {
+			scriptBody = remaining[0]
+		}
+		if scriptBody == "" {
+			fmt.Println("Error: must provide a command body or script to execute, or use -it for interactive session")
+			os.Exit(1)
+		}
+		targetArgs = []string{"-c", scriptBody}
 	}
 
-	if scriptBody == "" {
-		fmt.Println("Error: must provide a command body or script to execute")
-		fmt.Println("Example: gojail run -v /tmp/data:/data:ro \"ls -la /data\"")
-		os.Exit(1)
+	timeoutDur := time.Duration(*timeoutSec) * time.Second
+	if isInteractive && timeoutDur == 0 {
+		timeoutDur = 1 * time.Hour // Sane fallback for interactive shell
 	}
 
 	c := client.NewClient(*socketPath)
 
 	opts := client.ExecOptions{
-		Command:          *cmdFlag,
-		Args:             []string{"-c", scriptBody},
-		Timeout:          time.Duration(*timeoutSec) * time.Second,
+		Command:          targetCmd,
+		Args:             targetArgs,
+		Timeout:          timeoutDur,
 		MemoryLimitBytes: *memMB * 1024 * 1024,
 		MaxProcesses:     *procsMax,
 		StorageLimitMB:   *storageMB,
 		Mounts:           mountSpecs,
+		TTY:              isInteractive,
 		Stdout:           os.Stdout,
 		Stderr:           os.Stderr,
 	}
 
 	resp, err := c.Run(opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[gojail] Client error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "\n[gojail] Client error: %v\n", err)
 		os.Exit(1)
 	}
 
 	if resp.Error != "" {
-		fmt.Fprintf(os.Stderr, "[gojail] Execution rejected: %s\n", resp.Error)
+		fmt.Fprintf(os.Stderr, "\n[gojail] Execution rejected: %s\n", resp.Error)
 		os.Exit(1)
 	}
 
 	if resp.TimedOut {
-		fmt.Fprintf(os.Stderr, "[gojail] Execution timed out after %v\n", resp.Duration)
+		fmt.Fprintf(os.Stderr, "\n[gojail] Execution timed out after %v\n", resp.Duration)
 	}
 
 	if *showMetrics {
@@ -205,6 +240,7 @@ func printUsage() {
 	fmt.Println("  run      Execute command via the background daemon (gojaild)")
 	fmt.Println("  direct   Execute command directly using root permissions (standalone mode)")
 	fmt.Println("\nOptions for run:")
+	fmt.Println("  -it            Run an interactive session connected to a pseudo-TTY")
 	fmt.Println("  -v, --volume   Bind mount: host:target[:ro|rw] (can be specified multiple times)")
 	fmt.Println("  -mem int       Memory ceiling in MB (default 128)")
 	fmt.Println("  -procs int     Max processes (default 64)")
