@@ -21,6 +21,7 @@ type ExecOptions struct {
 	Timeout          time.Duration
 	MemoryLimitBytes int64
 	MaxProcesses     int64
+	StorageLimitMB   int64
 	Stdout           io.Writer
 	Stderr           io.Writer
 }
@@ -69,6 +70,7 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 		Timeout          time.Duration `json:"timeout"`
 		MemoryLimitBytes int64         `json:"memory_limit_bytes"`
 		MaxProcesses     int64         `json:"max_processes"`
+		StorageLimitMB   int64         `json:"storage_limit_mb"`
 	}{
 		Command:          opts.Command,
 		Args:             opts.Args,
@@ -76,6 +78,7 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 		Timeout:          opts.Timeout,
 		MemoryLimitBytes: opts.MemoryLimitBytes,
 		MaxProcesses:     opts.MaxProcesses,
+		StorageLimitMB:   opts.StorageLimitMB,
 	}
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {

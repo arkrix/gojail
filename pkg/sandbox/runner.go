@@ -30,7 +30,7 @@ func NewRunner(cfg Config) *Runner {
 		cfg.MaxProcesses = 64
 	}
 	if cfg.MemoryLimitBytes == 0 {
-		cfg.MemoryLimitBytes = 128 * 1024 * 1024 // 128 MB default
+		cfg.MemoryLimitBytes = 128 * 1024 * 1024
 	}
 	if cfg.StorageLimitMB == 0 {
 		cfg.StorageLimitMB = 64
@@ -44,6 +44,23 @@ func (r *Runner) Run() (*Result, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.Timeout)
 	defer cancel()
 
+	// 1. Prepare overlay filesystem in parent host namespace
+	overlay, err := NewOverlayManager(r.cfg.ID, r.cfg.StorageLimitMB)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize overlay manager: %w", err)
+	}
+	defer func() {
+		_ = overlay.Cleanup()
+	}()
+
+	targetRoot, err := overlay.Mount()
+	if err != nil {
+		return nil, fmt.Errorf("failed to mount overlay: %w", err)
+	}
+
+	r.cfg.RootPath = targetRoot
+
+	// 2. Setup cgroup limits
 	cg, err := NewCgroupController(r.cfg.ID)
 	if err != nil {
 		return nil, fmt.Errorf("cgroup init error: %w", err)
@@ -197,18 +214,9 @@ func InitChild(cfgJSON string) error {
 		return fmt.Errorf("child: failed to make root private: %w", err)
 	}
 
-	// Set up OverlayFS union mount
-	overlay, err := NewOverlayManager(cfg.ID, cfg.StorageLimitMB)
-	if err != nil {
-		return fmt.Errorf("child: overlay init failed: %w", err)
-	}
-	defer func() {
-		_ = overlay.Cleanup()
-	}()
-
-	targetRoot, err := overlay.Mount()
-	if err != nil {
-		return fmt.Errorf("child: overlay mount failed: %w", err)
+	targetRoot := cfg.RootPath
+	if targetRoot == "" {
+		return errors.New("child: missing root path for container")
 	}
 
 	if err := mountDevNodes(targetRoot); err != nil {

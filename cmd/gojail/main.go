@@ -44,6 +44,7 @@ func handleRunCommand(args []string) {
 	timeoutSec := fs.Int("timeout", 5, "Execution timeout in seconds")
 	memMB := fs.Int64("mem", 128, "Memory ceiling in megabytes")
 	procsMax := fs.Int64("procs", 64, "Maximum allowed processes")
+	storageMB := fs.Int64("storage", 64, "Scratch storage ceiling in megabytes")
 	showMetrics := fs.Bool("metrics", false, "Print peak memory and CPU telemetry")
 	socketPath := fs.String("socket", "/var/run/gojail.sock", "Path to gojaild socket")
 
@@ -71,6 +72,7 @@ func handleRunCommand(args []string) {
 		Timeout:          time.Duration(*timeoutSec) * time.Second,
 		MemoryLimitBytes: *memMB * 1024 * 1024,
 		MaxProcesses:     *procsMax,
+		StorageLimitMB:   *storageMB,
 		Stdout:           os.Stdout,
 		Stderr:           os.Stderr,
 	}
@@ -106,6 +108,7 @@ func handleDirectCommand(args []string) {
 	timeoutSec := fs.Int("timeout", 5, "Execution timeout in seconds")
 	memMB := fs.Int64("mem", 128, "Memory ceiling in megabytes")
 	procsMax := fs.Int64("procs", 32, "Maximum allowed processes")
+	storageMB := fs.Int64("storage", 64, "Storage ceiling in megabytes")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
@@ -127,6 +130,7 @@ func handleDirectCommand(args []string) {
 		ID:               sandboxID,
 		MemoryLimitBytes: *memMB * 1024 * 1024,
 		MaxProcesses:     *procsMax,
+		StorageLimitMB:   *storageMB,
 		Timeout:          time.Duration(*timeoutSec) * time.Second,
 		Command:          *cmdFlag,
 		Args:             []string{"-c", scriptBody},
@@ -155,7 +159,10 @@ func printUsage() {
 	fmt.Println("\nCommands:")
 	fmt.Println("  run      Execute command via the background daemon (gojaild)")
 	fmt.Println("  direct   Execute command directly using root permissions (standalone mode)")
-	fmt.Println("\nExamples:")
-	fmt.Println("  gojail run \"echo 'Hello World'\"")
-	fmt.Println("  gojail run -metrics \"python3 -c 'sum(range(1000000))'\"")
+	fmt.Println("\nOptions for run:")
+	fmt.Println("  -mem int       Memory ceiling in MB (default 128)")
+	fmt.Println("  -procs int     Max processes (default 64)")
+	fmt.Println("  -storage int   Scratch storage ceiling in MB (default 64)")
+	fmt.Println("  -timeout int   Timeout in seconds (default 5)")
+	fmt.Println("  -metrics       Print peak memory and CPU telemetry")
 }

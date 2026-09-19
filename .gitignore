@@ -1,0 +1,39 @@
+# Binaries and build outputs
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries and coverage reports
+*.test
+*.out
+cover.out
+coverage.html
+profile.pprof
+
+# GoJail runtime scratch files and sockets
+*.sock
+/run/
+/layers/
+
+# Go dependency and tool caches
+vendor/
+
+# Environment and local developer overrides
+.env
+.env.local
+config.local.yaml
+
+# Editor and IDE metadata
+.vscode/
+.idea/
+*.swp
+*~
+*.swo
+.DS_Store
+
+# Temporary build/log artifacts
+*.log
+/tmp/

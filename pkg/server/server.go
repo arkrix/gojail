@@ -26,6 +26,7 @@ type Request struct {
 	Timeout          time.Duration `json:"timeout"`
 	MemoryLimitBytes int64         `json:"memory_limit_bytes"`
 	MaxProcesses     int64         `json:"max_processes"`
+	StorageLimitMB   int64         `json:"storage_limit_mb"`
 }
 
 // Daemon represents the long-running gojaild server instance.
@@ -48,14 +49,19 @@ func NewDaemon(cfg *config.DaemonConfig) *Daemon {
 	}
 }
 
-// Start creates the socket, warms up sandboxes, and begins accepting connections.
+// Start creates the socket, warms up sandboxes with storage limits, and begins accepting connections.
 func (d *Daemon) Start() error {
 	poolSize := d.cfg.Pool.WarmWorkers
 	if poolSize <= 0 {
 		poolSize = 2
 	}
 
-	pool, err := sandbox.NewPool(poolSize)
+	storageLimit := d.cfg.Defaults.StorageLimitMB
+	if storageLimit <= 0 {
+		storageLimit = 64
+	}
+
+	pool, err := sandbox.NewPoolWithStorage(poolSize, storageLimit)
 	if err != nil {
 		return fmt.Errorf("failed to initialize warm pool: %w", err)
 	}
@@ -86,8 +92,8 @@ func (d *Daemon) Start() error {
 	}
 
 	d.listener = listener
-	fmt.Printf("[gojaild] Listening on unix://%s (Pool: %d workers, Mode: %04o)\n",
-		socketPath, poolSize, mode)
+	fmt.Printf("[gojaild] Listening on unix://%s (Pool: %d workers, Storage: %dMB, Mode: %04o)\n",
+		socketPath, poolSize, storageLimit, mode)
 
 	d.wg.Add(1)
 	go d.acceptLoop()
@@ -143,6 +149,9 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	if req.MaxProcesses == 0 {
 		req.MaxProcesses = d.cfg.Defaults.MaxProcesses
 	}
+	if req.StorageLimitMB == 0 {
+		req.StorageLimitMB = d.cfg.Defaults.StorageLimitMB
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), req.Timeout)
 	defer cancel()
@@ -152,7 +161,8 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		script = req.Args[1]
 	}
 
-	worker, err := d.pool.Acquire()
+	// Use AcquireWithStorage to support custom storage quotas dynamically
+	worker, err := d.pool.AcquireWithStorage(req.StorageLimitMB)
 	if err != nil {
 		_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
 			ExitCode: 1,
