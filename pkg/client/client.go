@@ -54,6 +54,57 @@ func NewClient(socketPath string) *Client {
 	return &Client{socketPath: socketPath}
 }
 
+// ListJobs queries the daemon for currently active and recent sandboxes.
+func (c *Client) ListJobs() ([]protocol.JobInfo, error) {
+	conn, err := net.Dial("unix", c.socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to daemon at %s: %w", c.socketPath, err)
+	}
+	defer conn.Close()
+
+	req := protocol.Request{Action: "list"}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return nil, fmt.Errorf("failed to send list request: %w", err)
+	}
+
+	var resp protocol.ControlResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("failed to decode list response: %w", err)
+	}
+
+	if !resp.Success {
+		return nil, errors.New(resp.Error)
+	}
+	return resp.Jobs, nil
+}
+
+// StopJob instructs the daemon to terminate an active sandbox instance by ID.
+func (c *Client) StopJob(targetID string) error {
+	conn, err := net.Dial("unix", c.socketPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon at %s: %w", c.socketPath, err)
+	}
+	defer conn.Close()
+
+	req := protocol.Request{
+		Action:   "stop",
+		TargetID: targetID,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return fmt.Errorf("failed to send stop request: %w", err)
+	}
+
+	var resp protocol.ControlResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return fmt.Errorf("failed to decode stop response: %w", err)
+	}
+
+	if !resp.Success {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
 // Run executes the command via gojaild and streams I/O directly.
 func (c *Client) Run(opts ExecOptions) (*Response, error) {
 	conn, err := net.Dial("unix", c.socketPath)
@@ -69,18 +120,8 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 		opts.Stderr = os.Stderr
 	}
 
-	req := struct {
-		Command          string              `json:"command"`
-		Args             []string            `json:"args"`
-		Env              []string            `json:"env"`
-		Timeout          time.Duration       `json:"timeout"`
-		MemoryLimitBytes int64               `json:"memory_limit_bytes"`
-		MaxProcesses     int64               `json:"max_processes"`
-		StorageLimitMB   int64               `json:"storage_limit_mb"`
-		Mounts           []sandbox.MountSpec `json:"mounts,omitempty"`
-		TTY              bool                `json:"tty,omitempty"`
-		SeccompProfile   string              `json:"seccomp_profile,omitempty"`
-	}{
+	req := protocol.Request{
+		Action:           "run",
 		Command:          opts.Command,
 		Args:             opts.Args,
 		Env:              opts.Env,

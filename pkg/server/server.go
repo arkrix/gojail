@@ -20,17 +20,7 @@ import (
 )
 
 // Request defines the wire format sent by clients over the Unix socket.
-type Request struct {
-	Command          string              `json:"command"`
-	Args             []string            `json:"args"`
-	Env              []string            `json:"env"`
-	Timeout          time.Duration       `json:"timeout"`
-	MemoryLimitBytes int64               `json:"memory_limit_bytes"`
-	MaxProcesses     int64               `json:"max_processes"`
-	StorageLimitMB   int64               `json:"storage_limit_mb"`
-	Mounts           []sandbox.MountSpec `json:"mounts,omitempty"`
-	TTY              bool                `json:"tty,omitempty"`
-}
+type Request = protocol.Request
 
 // Daemon represents the long-running gojaild server instance.
 type Daemon struct {
@@ -39,6 +29,7 @@ type Daemon struct {
 	shutdown chan struct{}
 	wg       sync.WaitGroup
 	pool     *sandbox.Pool
+	registry *JobRegistry
 	lockFile *os.File
 }
 
@@ -49,6 +40,7 @@ func NewDaemon(cfg *config.DaemonConfig) *Daemon {
 	}
 	return &Daemon{
 		cfg:      cfg,
+		registry: NewJobRegistry(),
 		shutdown: make(chan struct{}),
 	}
 }
@@ -158,7 +150,7 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	frameWriter := protocol.NewFrameWriter(conn)
 	frameReader := protocol.NewFrameReader(conn)
 
-	var req Request
+	var req protocol.Request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
 		if !errors.Is(err, io.EOF) {
 			_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
@@ -169,6 +161,27 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		return
 	}
 
+	// Dispatch non-streaming control commands ("list" / "stop")
+	switch req.Action {
+	case "list":
+		jobs := d.registry.List()
+		_ = json.NewEncoder(conn).Encode(protocol.ControlResponse{
+			Success: true,
+			Jobs:    jobs,
+		})
+		return
+
+	case "stop":
+		err := d.registry.Stop(req.TargetID)
+		resp := protocol.ControlResponse{Success: err == nil}
+		if err != nil {
+			resp.Error = err.Error()
+		}
+		_ = json.NewEncoder(conn).Encode(resp)
+		return
+	}
+
+	// Default action: execute container workload
 	if req.Timeout == 0 {
 		req.Timeout = time.Duration(d.cfg.Defaults.TimeoutSec) * time.Second
 	}
@@ -198,6 +211,9 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		})
 		return
 	}
+
+	// Register active container instance in daemon registry
+	d.registry.Register(worker.ID, 0, req.Command, req.Args, cancel)
 
 	var writeMu sync.Mutex
 
@@ -230,12 +246,15 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 
 		res, ptyErr := worker.ExecutePTY(ctx, ptyHandler)
 		if ptyErr != nil {
+			d.registry.UpdateFinished(worker.ID, 1, 0, false)
 			_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
 				ExitCode: 1,
 				Error:    ptyErr.Error(),
 			})
 			return
 		}
+
+		d.registry.UpdateFinished(worker.ID, res.ExitCode, res.Metrics.PeakMemoryBytes, res.TimedOut)
 
 		_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
 			ExitCode: res.ExitCode,
@@ -266,12 +285,15 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 
 	res, err := worker.ExecuteStream(ctx, script, handler)
 	if err != nil {
+		d.registry.UpdateFinished(worker.ID, 1, 0, false)
 		_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
 			ExitCode: 1,
 			Error:    err.Error(),
 		})
 		return
 	}
+
+	d.registry.UpdateFinished(worker.ID, res.ExitCode, res.Metrics.PeakMemoryBytes, res.TimedOut)
 
 	_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
 		ExitCode: res.ExitCode,

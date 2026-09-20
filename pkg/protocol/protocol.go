@@ -11,7 +11,6 @@ import (
 	"github.com/arkrix/gojail/pkg/sandbox"
 )
 
-// StreamType distinguishes between different frame payloads.
 type StreamType uint8
 
 const (
@@ -22,13 +21,47 @@ const (
 	StreamResize StreamType = 5
 )
 
-// WindowSize conveys terminal dimensions across the wire.
+// Request defines the unified initial JSON payload sent from client to daemon.
+type Request struct {
+	Action           string              `json:"action,omitempty"` // "run", "list", "stop"
+	TargetID         string              `json:"target_id,omitempty"`
+	Command          string              `json:"command,omitempty"`
+	Args             []string            `json:"args,omitempty"`
+	Env              []string            `json:"env,omitempty"`
+	Timeout          time.Duration       `json:"timeout,omitempty"`
+	MemoryLimitBytes int64               `json:"memory_limit_bytes,omitempty"`
+	MaxProcesses     int64               `json:"max_processes,omitempty"`
+	StorageLimitMB   int64               `json:"storage_limit_mb,omitempty"`
+	Mounts           []sandbox.MountSpec `json:"mounts,omitempty"`
+	TTY              bool                `json:"tty,omitempty"`
+	SeccompProfile   string              `json:"seccomp_profile,omitempty"`
+}
+
+// JobInfo encapsulates runtime metadata about an instance tracked by the daemon.
+type JobInfo struct {
+	ID              string        `json:"id"`
+	PID             int           `json:"pid"`
+	Command         string        `json:"command"`
+	Args            []string      `json:"args"`
+	Status          string        `json:"status"` // "running", "completed", "failed", "killed", "timed_out"
+	StartTime       time.Time     `json:"start_time"`
+	Duration        time.Duration `json:"duration"`
+	PeakMemoryBytes int64         `json:"peak_memory_bytes"`
+	ExitCode        int           `json:"exit_code"`
+}
+
+// ControlResponse is returned for non-streaming control actions ("list", "stop").
+type ControlResponse struct {
+	Success bool      `json:"success"`
+	Error   string    `json:"error,omitempty"`
+	Jobs    []JobInfo `json:"jobs,omitempty"`
+}
+
 type WindowSize struct {
 	Rows uint16 `json:"rows"`
 	Cols uint16 `json:"cols"`
 }
 
-// ExitPayload serializes the final termination details.
 type ExitPayload struct {
 	ExitCode int                     `json:"exit_code"`
 	Duration time.Duration           `json:"duration"`
@@ -37,17 +70,14 @@ type ExitPayload struct {
 	Error    string                  `json:"error,omitempty"`
 }
 
-// FrameWriter encodes binary frames onto an io.Writer.
 type FrameWriter struct {
 	w io.Writer
 }
 
-// NewFrameWriter constructs a FrameWriter.
 func NewFrameWriter(w io.Writer) *FrameWriter {
 	return &FrameWriter{w: w}
 }
 
-// WriteFrame sends a single binary-encoded frame: [Type: 1B][Length: 4B (BigEndian)][Payload]
 func (fw *FrameWriter) WriteFrame(streamType StreamType, payload []byte) error {
 	header := make([]byte, 5)
 	header[0] = byte(streamType)
@@ -64,7 +94,6 @@ func (fw *FrameWriter) WriteFrame(streamType StreamType, payload []byte) error {
 	return nil
 }
 
-// WriteExitFrame encodes an ExitPayload as a StreamExit frame.
 func (fw *FrameWriter) WriteExitFrame(payload ExitPayload) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -73,17 +102,14 @@ func (fw *FrameWriter) WriteExitFrame(payload ExitPayload) error {
 	return fw.WriteFrame(StreamExit, data)
 }
 
-// FrameReader decodes binary frames from an io.Reader.
 type FrameReader struct {
 	r io.Reader
 }
 
-// NewFrameReader constructs a FrameReader.
 func NewFrameReader(r io.Reader) *FrameReader {
 	return &FrameReader{r: r}
 }
 
-// ReadFrame reads the next binary frame from the underlying reader.
 func (fr *FrameReader) ReadFrame() (StreamType, []byte, error) {
 	header := make([]byte, 5)
 	if _, err := io.ReadFull(fr.r, header); err != nil {
@@ -103,7 +129,6 @@ func (fr *FrameReader) ReadFrame() (StreamType, []byte, error) {
 	return streamType, payload, nil
 }
 
-// ParseExitPayload deserializes a StreamExit frame payload.
 func ParseExitPayload(payload []byte) (*ExitPayload, error) {
 	var exitPayload ExitPayload
 	if err := json.Unmarshal(payload, &exitPayload); err != nil {
@@ -112,7 +137,6 @@ func ParseExitPayload(payload []byte) (*ExitPayload, error) {
 	return &exitPayload, nil
 }
 
-// ParseWindowSize deserializes a StreamResize frame payload.
 func ParseWindowSize(payload []byte) (*WindowSize, error) {
 	if len(payload) < 4 {
 		return nil, errors.New("invalid resize payload length")
@@ -123,7 +147,6 @@ func ParseWindowSize(payload []byte) (*WindowSize, error) {
 	}, nil
 }
 
-// EncodeWindowSize serializes terminal rows and cols into 4 bytes.
 func EncodeWindowSize(rows, cols uint16) []byte {
 	buf := make([]byte, 4)
 	binary.BigEndian.PutUint16(buf[0:2], rows)

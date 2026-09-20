@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/arkrix/gojail/pkg/client"
@@ -50,6 +52,10 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		handleRunCommand(os.Args[2:])
+	case "ps", "list":
+		handlePsCommand(os.Args[2:])
+	case "stop":
+		handleStopCommand(os.Args[2:])
 	case "direct":
 		handleDirectCommand(os.Args[2:])
 	case "-h", "--help", "help":
@@ -171,6 +177,78 @@ func handleRunCommand(args []string) {
 	os.Exit(resp.ExitCode)
 }
 
+func handlePsCommand(args []string) {
+	fs := flag.NewFlagSet("ps", flag.ExitOnError)
+	socketPath := fs.String("socket", "/var/run/gojail.sock", "Path to gojaild socket")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
+		os.Exit(1)
+	}
+
+	c := client.NewClient(*socketPath)
+	jobs, err := c.ListJobs()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error querying jobs from daemon: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(jobs) == 0 {
+		fmt.Println("No active or recent containers.")
+		return
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
+	fmt.Fprintln(w, "CONTAINER ID\tPID\tSTATUS\tMEMORY\tUPTIME\tCOMMAND")
+
+	for _, j := range jobs {
+		cmdStr := j.Command
+		if len(j.Args) > 0 {
+			cmdStr += " " + strings.Join(j.Args, " ")
+		}
+		if len(cmdStr) > 30 {
+			cmdStr = cmdStr[:27] + "..."
+		}
+
+		memStr := "-"
+		if j.PeakMemoryBytes > 0 {
+			memStr = fmt.Sprintf("%.2f MB", float64(j.PeakMemoryBytes)/(1024*1024))
+		}
+
+		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n",
+			j.ID,
+			j.PID,
+			j.Status,
+			memStr,
+			j.Duration.Truncate(time.Second),
+			cmdStr,
+		)
+	}
+	_ = w.Flush()
+}
+
+func handleStopCommand(args []string) {
+	fs := flag.NewFlagSet("stop", flag.ExitOnError)
+	socketPath := fs.String("socket", "/var/run/gojail.sock", "Path to gojaild socket")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
+		os.Exit(1)
+	}
+
+	target := fs.Arg(0)
+	if target == "" {
+		fmt.Println("Error: must specify a container ID to stop")
+		os.Exit(1)
+	}
+
+	c := client.NewClient(*socketPath)
+	if err := c.StopJob(target); err != nil {
+		fmt.Fprintf(os.Stderr, "Error stopping container %s: %v\n", target, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Container %s stopped successfully.\n", target)
+}
+
 func handleDirectCommand(args []string) {
 	fs := flag.NewFlagSet("direct", flag.ExitOnError)
 	cmdFlag := fs.String("cmd", "/bin/sh", "Command binary to execute")
@@ -240,8 +318,10 @@ func handleDirectCommand(args []string) {
 func printUsage() {
 	fmt.Println("Usage: gojail <command> [options] [script]")
 	fmt.Println("\nCommands:")
-	fmt.Println("  run      Execute command via the background daemon (gojaild)")
-	fmt.Println("  direct   Execute command directly using root permissions (standalone mode)")
+	fmt.Println("  run            Execute command via the background daemon (gojaild)")
+	fmt.Println("  ps, list       List active and recently finished sandbox containers")
+	fmt.Println("  stop <id>      Terminate an active sandbox container")
+	fmt.Println("  direct         Execute command directly using root permissions (standalone mode)")
 	fmt.Println("\nOptions for run:")
 	fmt.Println("  -it            Run an interactive session connected to a pseudo-TTY")
 	fmt.Println("  -v, --volume   Bind mount: host:target[:ro|rw] (can be specified multiple times)")
