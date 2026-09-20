@@ -57,6 +57,10 @@ func main() {
 		handlePsCommand(os.Args[2:])
 	case "stop":
 		handleStopCommand(os.Args[2:])
+	case "pause":
+		handlePauseCommand(os.Args[2:])
+	case "unpause":
+		handleUnpauseCommand(os.Args[2:])
 	case "stats", "top":
 		handleStatsCommand(os.Args[2:])
 	case "direct":
@@ -252,6 +256,52 @@ func handleStopCommand(args []string) {
 	fmt.Printf("Container %s stopped successfully.\n", target)
 }
 
+func handlePauseCommand(args []string) {
+	fs := flag.NewFlagSet("pause", flag.ExitOnError)
+	socketPath := fs.String("socket", "/var/run/gojail.sock", "Path to gojaild socket")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
+		os.Exit(1)
+	}
+
+	target := fs.Arg(0)
+	if target == "" {
+		fmt.Println("Error: must specify a container ID to pause")
+		os.Exit(1)
+	}
+
+	c := client.NewClient(*socketPath)
+	if err := c.PauseJob(target); err != nil {
+		fmt.Fprintf(os.Stderr, "Error pausing container %s: %v\n", target, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Container %s paused successfully.\n", target)
+}
+
+func handleUnpauseCommand(args []string) {
+	fs := flag.NewFlagSet("unpause", flag.ExitOnError)
+	socketPath := fs.String("socket", "/var/run/gojail.sock", "Path to gojaild socket")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
+		os.Exit(1)
+	}
+
+	target := fs.Arg(0)
+	if target == "" {
+		fmt.Println("Error: must specify a container ID to unpause")
+		os.Exit(1)
+	}
+
+	c := client.NewClient(*socketPath)
+	if err := c.UnpauseJob(target); err != nil {
+		fmt.Fprintf(os.Stderr, "Error unpausing container %s: %v\n", target, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Container %s resumed successfully.\n", target)
+}
+
 func handleStatsCommand(args []string) {
 	fs := flag.NewFlagSet("stats", flag.ExitOnError)
 	socketPath := fs.String("socket", "/var/run/gojail.sock", "Path to gojaild socket")
@@ -378,6 +428,8 @@ func printUsage() {
 	fmt.Println("  run            Execute command via the background daemon (gojaild)")
 	fmt.Println("  ps, list       List active and recently finished sandbox containers")
 	fmt.Println("  stop <id>      Terminate an active sandbox container")
+	fmt.Println("  pause <id>     Suspend execution of an active sandbox container")
+	fmt.Println("  unpause <id>   Resume execution of a paused sandbox container")
 	fmt.Println("  stats <id>     Stream real-time resource utilization for an active container")
 	fmt.Println("  direct         Execute command directly using root permissions (standalone mode)")
 	fmt.Println("\nOptions for run:")

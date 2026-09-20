@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/json"
 	"net"
 	"path/filepath"
 	"testing"
@@ -111,5 +112,56 @@ func TestClient_StreamStats(t *testing.T) {
 
 	if receivedSamples != 1 {
 		t.Fatalf("expected 1 sample, got %d", receivedSamples)
+	}
+}
+
+func TestClient_PauseAndUnpause(t *testing.T) {
+	tmpDir := t.TempDir()
+	sockPath := filepath.Join(tmpDir, "test_pause.sock")
+
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer l.Close()
+
+	go func() {
+		for {
+			conn, aErr := l.Accept()
+			if aErr != nil {
+				return
+			}
+
+			var req protocol.Request
+			if err := json.NewDecoder(conn).Decode(&req); err != nil {
+				conn.Close()
+				continue
+			}
+
+			var resp protocol.ControlResponse
+			if req.TargetID == "test-jail-1" && (req.Action == "pause" || req.Action == "unpause") {
+				resp.Success = true
+			} else {
+				resp.Success = false
+				resp.Error = "invalid target or action"
+			}
+
+			_ = json.NewEncoder(conn).Encode(resp)
+			conn.Close()
+		}
+	}()
+
+	c := NewClient(sockPath)
+
+	if err := c.PauseJob("test-jail-1"); err != nil {
+		t.Fatalf("PauseJob failed: %v", err)
+	}
+
+	if err := c.UnpauseJob("test-jail-1"); err != nil {
+		t.Fatalf("UnpauseJob failed: %v", err)
+	}
+
+	if err := c.PauseJob("invalid-id"); err == nil {
+		t.Errorf("expected error on invalid target, got nil")
 	}
 }

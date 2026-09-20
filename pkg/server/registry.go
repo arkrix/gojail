@@ -110,6 +110,58 @@ func (r *JobRegistry) UpdateFinished(id string, exitCode int, peakMem int64, tim
 	}
 }
 
+// Pause halts execution of all processes inside the container's cgroup.
+func (r *JobRegistry) Pause(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	job, exists := r.jobs[id]
+	if !exists {
+		return fmt.Errorf("container instance %q not found", id)
+	}
+
+	if job.info.Status != "running" {
+		return fmt.Errorf("cannot pause container %q with status %q", id, job.info.Status)
+	}
+
+	if job.cgroup == nil {
+		return fmt.Errorf("cgroup controller not attached to container %q", id)
+	}
+
+	if err := job.cgroup.Freeze(); err != nil {
+		return fmt.Errorf("failed to freeze container cgroup: %w", err)
+	}
+
+	job.info.Status = "paused"
+	return nil
+}
+
+// Unpause resumes execution of all frozen processes inside the container's cgroup.
+func (r *JobRegistry) Unpause(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	job, exists := r.jobs[id]
+	if !exists {
+		return fmt.Errorf("container instance %q not found", id)
+	}
+
+	if job.info.Status != "paused" {
+		return fmt.Errorf("cannot unpause container %q with status %q", id, job.info.Status)
+	}
+
+	if job.cgroup == nil {
+		return fmt.Errorf("cgroup controller not attached to container %q", id)
+	}
+
+	if err := job.cgroup.Thaw(); err != nil {
+		return fmt.Errorf("failed to thaw container cgroup: %w", err)
+	}
+
+	job.info.Status = "running"
+	return nil
+}
+
 // Stop signals cancellation to an active container job.
 func (r *JobRegistry) Stop(id string) error {
 	r.mu.Lock()
@@ -120,8 +172,13 @@ func (r *JobRegistry) Stop(id string) error {
 		return fmt.Errorf("container instance %q not found", id)
 	}
 
-	if job.info.Status != "running" {
-		return fmt.Errorf("container instance %q is not running (current status: %s)", id, job.info.Status)
+	if job.info.Status != "running" && job.info.Status != "paused" {
+		return fmt.Errorf("container instance %q is not active (current status: %s)", id, job.info.Status)
+	}
+
+	// If paused, thaw before canceling so SIGKILL/context cancel can be handled
+	if job.info.Status == "paused" && job.cgroup != nil {
+		_ = job.cgroup.Thaw()
 	}
 
 	job.info.Status = "killed"
@@ -139,7 +196,7 @@ func (r *JobRegistry) List() []protocol.JobInfo {
 	result := make([]protocol.JobInfo, 0, len(r.jobs))
 	for _, job := range r.jobs {
 		info := job.info
-		if info.Status == "running" {
+		if info.Status == "running" || info.Status == "paused" {
 			info.Duration = time.Since(info.StartTime)
 		}
 		result = append(result, info)

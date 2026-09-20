@@ -175,6 +175,24 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		_ = json.NewEncoder(conn).Encode(resp)
 		return
 
+	case "pause":
+		err := d.registry.Pause(req.TargetID)
+		resp := protocol.ControlResponse{Success: err == nil}
+		if err != nil {
+			resp.Error = err.Error()
+		}
+		_ = json.NewEncoder(conn).Encode(resp)
+		return
+
+	case "unpause":
+		err := d.registry.Unpause(req.TargetID)
+		resp := protocol.ControlResponse{Success: err == nil}
+		if err != nil {
+			resp.Error = err.Error()
+		}
+		_ = json.NewEncoder(conn).Encode(resp)
+		return
+
 	case "stats":
 		d.handleStatsStream(conn, frameWriter, req.TargetID)
 		return

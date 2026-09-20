@@ -84,3 +84,30 @@ func TestJobRegistry_Stop(t *testing.T) {
 		t.Errorf("expected error when stopping nonexistent job, got nil")
 	}
 }
+
+func TestJobRegistry_PauseAndUnpauseValidation(t *testing.T) {
+	reg := NewJobRegistry()
+
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	reg.Register("job-1", 1234, "/bin/sleep", []string{"60"}, cancel)
+
+	// Pausing without an attached cgroup controller should fail
+	if err := reg.Pause("job-1"); err == nil {
+		t.Errorf("expected error when pausing job without attached cgroup, got nil")
+	}
+
+	// Unpausing a running job should fail
+	if err := reg.Unpause("job-1"); err == nil {
+		t.Errorf("expected error when unpausing non-paused job, got nil")
+	}
+
+	// Pausing or unpausing nonexistent job should fail
+	if err := reg.Pause("nonexistent"); err == nil {
+		t.Errorf("expected error when pausing nonexistent job, got nil")
+	}
+	if err := reg.Unpause("nonexistent"); err == nil {
+		t.Errorf("expected error when unpausing nonexistent job, got nil")
+	}
+}

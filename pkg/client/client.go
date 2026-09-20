@@ -105,6 +105,60 @@ func (c *Client) StopJob(targetID string) error {
 	return nil
 }
 
+// PauseJob suspends an actively running sandbox instance by ID.
+func (c *Client) PauseJob(targetID string) error {
+	conn, err := net.Dial("unix", c.socketPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon at %s: %w", c.socketPath, err)
+	}
+	defer conn.Close()
+
+	req := protocol.Request{
+		Action:   "pause",
+		TargetID: targetID,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return fmt.Errorf("failed to send pause request: %w", err)
+	}
+
+	var resp protocol.ControlResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return fmt.Errorf("failed to decode pause response: %w", err)
+	}
+
+	if !resp.Success {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
+// UnpauseJob resumes a previously paused sandbox instance by ID.
+func (c *Client) UnpauseJob(targetID string) error {
+	conn, err := net.Dial("unix", c.socketPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon at %s: %w", c.socketPath, err)
+	}
+	defer conn.Close()
+
+	req := protocol.Request{
+		Action:   "unpause",
+		TargetID: targetID,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return fmt.Errorf("failed to send unpause request: %w", err)
+	}
+
+	var resp protocol.ControlResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return fmt.Errorf("failed to decode unpause response: %w", err)
+	}
+
+	if !resp.Success {
+		return errors.New(resp.Error)
+	}
+	return nil
+}
+
 // StreamStats connects to gojaild, streams real-time metrics, and yields each sample to the onStats callback.
 func (c *Client) StreamStats(targetID string, onStats func(protocol.StatsPayload)) error {
 	conn, err := net.Dial("unix", c.socketPath)
