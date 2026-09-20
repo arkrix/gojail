@@ -28,6 +28,11 @@ type Worker struct {
 	ptyMaster *os.File
 }
 
+// Cgroup returns the underlying CgroupController for metrics and telemetry sampling.
+func (w *Worker) Cgroup() *CgroupController {
+	return w.cgroup
+}
+
 // Pool maintains a standby pool of warmed sandbox processes.
 type Pool struct {
 	mu             sync.Mutex

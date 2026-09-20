@@ -105,6 +105,49 @@ func (c *Client) StopJob(targetID string) error {
 	return nil
 }
 
+// StreamStats connects to gojaild, streams real-time metrics, and yields each sample to the onStats callback.
+func (c *Client) StreamStats(targetID string, onStats func(protocol.StatsPayload)) error {
+	conn, err := net.Dial("unix", c.socketPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect to daemon at %s: %w", c.socketPath, err)
+	}
+	defer conn.Close()
+
+	req := protocol.Request{
+		Action:   "stats",
+		TargetID: targetID,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return fmt.Errorf("failed to send stats request: %w", err)
+	}
+
+	fr := protocol.NewFrameReader(conn)
+	for {
+		streamType, payload, err := fr.ReadFrame()
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+				break
+			}
+			return fmt.Errorf("error reading stats frame: %w", err)
+		}
+
+		switch streamType {
+		case protocol.StreamStats:
+			stats, err := protocol.ParseStatsPayload(payload)
+			if err == nil && onStats != nil {
+				onStats(*stats)
+			}
+		case protocol.StreamExit:
+			exitPayload, err := protocol.ParseExitPayload(payload)
+			if err == nil && exitPayload.Error != "" {
+				return errors.New(exitPayload.Error)
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
 // Run executes the command via gojaild and streams I/O directly.
 func (c *Client) Run(opts ExecOptions) (*Response, error) {
 	conn, err := net.Dial("unix", c.socketPath)
@@ -141,7 +184,6 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 	frameWriter := protocol.NewFrameWriter(conn)
 	frameReader := protocol.NewFrameReader(conn)
 
-	// If interactive TTY requested, configure raw mode and forward stdin + window resizes
 	if opts.TTY && term.IsTerminal(int(os.Stdin.Fd())) {
 		oldState, rErr := term.MakeRaw(int(os.Stdin.Fd()))
 		if rErr == nil {
@@ -150,12 +192,10 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 			}()
 		}
 
-		// Initial window size
 		if width, height, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
 			_ = frameWriter.WriteFrame(protocol.StreamResize, protocol.EncodeWindowSize(uint16(height), uint16(width)))
 		}
 
-		// Watch SIGWINCH for window resizes
 		sigwinch := make(chan os.Signal, 1)
 		signal.Notify(sigwinch, syscall.SIGWINCH)
 		defer signal.Stop(sigwinch)
@@ -168,7 +208,6 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 			}
 		}()
 
-		// Pump os.Stdin -> StreamStdin frames
 		go func() {
 			buf := make([]byte, 1024)
 			for {
@@ -183,7 +222,6 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 		}()
 	}
 
-	// Read responses from daemon
 	for {
 		streamType, payload, rErr := frameReader.ReadFrame()
 		if rErr != nil {

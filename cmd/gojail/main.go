@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/arkrix/gojail/pkg/client"
+	"github.com/arkrix/gojail/pkg/protocol"
 	"github.com/arkrix/gojail/pkg/sandbox"
 )
 
@@ -56,6 +57,8 @@ func main() {
 		handlePsCommand(os.Args[2:])
 	case "stop":
 		handleStopCommand(os.Args[2:])
+	case "stats", "top":
+		handleStatsCommand(os.Args[2:])
 	case "direct":
 		handleDirectCommand(os.Args[2:])
 	case "-h", "--help", "help":
@@ -249,6 +252,60 @@ func handleStopCommand(args []string) {
 	fmt.Printf("Container %s stopped successfully.\n", target)
 }
 
+func handleStatsCommand(args []string) {
+	fs := flag.NewFlagSet("stats", flag.ExitOnError)
+	socketPath := fs.String("socket", "/var/run/gojail.sock", "Path to gojaild socket")
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
+		os.Exit(1)
+	}
+
+	target := fs.Arg(0)
+	if target == "" {
+		fmt.Println("Error: must specify a container ID to stream stats for")
+		os.Exit(1)
+	}
+
+	c := client.NewClient(*socketPath)
+	headerPrinted := false
+
+	err := c.StreamStats(target, func(s protocol.StatsPayload) {
+		memMB := float64(s.MemoryBytes) / (1024 * 1024)
+		peakMB := float64(s.PeakMemoryBytes) / (1024 * 1024)
+
+		limitStr := "unlimited"
+		if s.MemoryLimitBytes > 0 {
+			limitStr = fmt.Sprintf("%.2f MB", float64(s.MemoryLimitBytes)/(1024*1024))
+		}
+
+		pidLimitStr := "max"
+		if s.PIDsLimit > 0 {
+			pidLimitStr = fmt.Sprintf("%d", s.PIDsLimit)
+		}
+
+		if !headerPrinted {
+			fmt.Printf("%-24s %-10s %-20s %-12s %-12s\n", "CONTAINER ID", "CPU %", "MEM USAGE / LIMIT", "PEAK MEM", "PIDS")
+			headerPrinted = true
+		}
+
+		fmt.Printf("\r%-24s %-9.2f%% %-7.2fMB / %-9s %-10.2fMB %d / %-6s",
+			s.ContainerID,
+			s.CPUPercent,
+			memMB,
+			limitStr,
+			peakMB,
+			s.PIDsCurrent,
+			pidLimitStr,
+		)
+	})
+
+	fmt.Println()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Stats stream error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func handleDirectCommand(args []string) {
 	fs := flag.NewFlagSet("direct", flag.ExitOnError)
 	cmdFlag := fs.String("cmd", "/bin/sh", "Command binary to execute")
@@ -321,6 +378,7 @@ func printUsage() {
 	fmt.Println("  run            Execute command via the background daemon (gojaild)")
 	fmt.Println("  ps, list       List active and recently finished sandbox containers")
 	fmt.Println("  stop <id>      Terminate an active sandbox container")
+	fmt.Println("  stats <id>     Stream real-time resource utilization for an active container")
 	fmt.Println("  direct         Execute command directly using root permissions (standalone mode)")
 	fmt.Println("\nOptions for run:")
 	fmt.Println("  -it            Run an interactive session connected to a pseudo-TTY")

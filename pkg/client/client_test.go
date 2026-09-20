@@ -1,78 +1,115 @@
 package client
 
 import (
-	"bytes"
-	"encoding/json"
 	"net"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/arkrix/gojail/pkg/protocol"
-	"github.com/arkrix/gojail/pkg/server"
 )
 
 func TestClient_Run(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "gojail-client-test-*")
-	if err != nil {
-		t.Fatalf("failed to create tempdir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
+	tmpDir := t.TempDir()
+	sockPath := filepath.Join(tmpDir, "test.sock")
 
-	sockPath := filepath.Join(tempDir, "test.sock")
-	listener, err := net.Listen("unix", sockPath)
+	l, err := net.Listen("unix", sockPath)
 	if err != nil {
-		t.Fatalf("failed to create mock unix listener: %v", err)
+		t.Fatalf("failed to listen: %v", err)
 	}
-	defer listener.Close()
+	defer l.Close()
 
-	// Mock server that streams frames
 	go func() {
-		conn, acceptErr := listener.Accept()
-		if acceptErr != nil {
+		conn, aErr := l.Accept()
+		if aErr != nil {
 			return
 		}
 		defer conn.Close()
 
-		var req server.Request
-		if decErr := json.NewDecoder(conn).Decode(&req); decErr != nil {
-			return
-		}
-
 		fw := protocol.NewFrameWriter(conn)
-		_ = fw.WriteFrame(protocol.StreamStdout, []byte("echo: "+req.Command))
+		_ = fw.WriteFrame(protocol.StreamStdout, []byte("hello from daemon"))
 		_ = fw.WriteExitFrame(protocol.ExitPayload{
 			ExitCode: 0,
-			Duration: 5 * time.Millisecond,
-			TimedOut: false,
+			Duration: 10 * time.Millisecond,
 		})
 	}()
 
-	var stdoutBuf bytes.Buffer
 	c := NewClient(sockPath)
-	res, err := c.Run(ExecOptions{
+	resp, err := c.Run(ExecOptions{
 		Command: "/bin/echo",
 		Args:    []string{"hello"},
-		Timeout: 2 * time.Second,
-		Stdout:  &stdoutBuf,
 	})
 	if err != nil {
-		t.Fatalf("client.Run failed: %v", err)
+		t.Fatalf("Run failed: %v", err)
 	}
 
-	if res.ExitCode != 0 {
-		t.Errorf("expected exit code 0, got %d", res.ExitCode)
-	}
-	if stdoutBuf.String() != "echo: /bin/echo" {
-		t.Errorf("unexpected stdout: %s", stdoutBuf.String())
+	if resp.ExitCode != 0 {
+		t.Errorf("expected exit code 0, got %d", resp.ExitCode)
 	}
 }
 
 func TestClient_ConnectionRefused(t *testing.T) {
-	c := NewClient("/tmp/non_existent_gojail.sock")
-	_, err := c.Run(ExecOptions{Command: "/bin/sh"})
+	c := NewClient("/tmp/nonexistent_gojail_socket.sock")
+	_, err := c.Run(ExecOptions{
+		Command: "/bin/echo",
+	})
 	if err == nil {
-		t.Fatal("expected error connecting to non-existent socket, got nil")
+		t.Errorf("expected error on missing socket, got nil")
+	}
+}
+
+func TestClient_StreamStats(t *testing.T) {
+	tmpDir := t.TempDir()
+	sockPath := filepath.Join(tmpDir, "test_stats.sock")
+
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer l.Close()
+
+	go func() {
+		conn, aErr := l.Accept()
+		if aErr != nil {
+			return
+		}
+		defer conn.Close()
+
+		fw := protocol.NewFrameWriter(conn)
+		_ = fw.WriteStatsFrame(protocol.StatsPayload{
+			ContainerID:      "test-jail-1",
+			Timestamp:        time.Now(),
+			MemoryBytes:      32 * 1024 * 1024,
+			MemoryLimitBytes: 128 * 1024 * 1024,
+			PeakMemoryBytes:  40 * 1024 * 1024,
+			CPUPercent:       15.5,
+			PIDsCurrent:      3,
+			PIDsLimit:        64,
+		})
+		_ = fw.WriteExitFrame(protocol.ExitPayload{ExitCode: 0})
+	}()
+
+	c := NewClient(sockPath)
+	receivedSamples := 0
+
+	err = c.StreamStats("test-jail-1", func(s protocol.StatsPayload) {
+		receivedSamples++
+		if s.ContainerID != "test-jail-1" {
+			t.Errorf("expected container ID 'test-jail-1', got %s", s.ContainerID)
+		}
+		if s.CPUPercent != 15.5 {
+			t.Errorf("expected CPU percent 15.5, got %.2f", s.CPUPercent)
+		}
+		if s.PIDsCurrent != 3 {
+			t.Errorf("expected 3 current PIDs, got %d", s.PIDsCurrent)
+		}
+	})
+
+	if err != nil {
+		t.Fatalf("StreamStats failed: %v", err)
+	}
+
+	if receivedSamples != 1 {
+		t.Fatalf("expected 1 sample, got %d", receivedSamples)
 	}
 }

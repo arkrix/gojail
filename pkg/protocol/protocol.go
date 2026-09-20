@@ -19,11 +19,12 @@ const (
 	StreamExit   StreamType = 3
 	StreamStdin  StreamType = 4
 	StreamResize StreamType = 5
+	StreamStats  StreamType = 6
 )
 
 // Request defines the unified initial JSON payload sent from client to daemon.
 type Request struct {
-	Action           string              `json:"action,omitempty"` // "run", "list", "stop"
+	Action           string              `json:"action,omitempty"` // "run", "list", "stop", "stats"
 	TargetID         string              `json:"target_id,omitempty"`
 	Command          string              `json:"command,omitempty"`
 	Args             []string            `json:"args,omitempty"`
@@ -35,6 +36,19 @@ type Request struct {
 	Mounts           []sandbox.MountSpec `json:"mounts,omitempty"`
 	TTY              bool                `json:"tty,omitempty"`
 	SeccompProfile   string              `json:"seccomp_profile,omitempty"`
+}
+
+// StatsPayload represents a point-in-time metrics sample streamed from daemon to client.
+type StatsPayload struct {
+	ContainerID      string    `json:"container_id"`
+	Timestamp        time.Time `json:"timestamp"`
+	MemoryBytes      int64     `json:"memory_bytes"`
+	MemoryLimitBytes int64     `json:"memory_limit_bytes"`
+	PeakMemoryBytes  int64     `json:"peak_memory_bytes"`
+	CPUUsageUS       int64     `json:"cpu_usage_us"`
+	CPUPercent       float64   `json:"cpu_percent"`
+	PIDsCurrent      int64     `json:"pids_current"`
+	PIDsLimit        int64     `json:"pids_limit"`
 }
 
 // JobInfo encapsulates runtime metadata about an instance tracked by the daemon.
@@ -102,6 +116,14 @@ func (fw *FrameWriter) WriteExitFrame(payload ExitPayload) error {
 	return fw.WriteFrame(StreamExit, data)
 }
 
+func (fw *FrameWriter) WriteStatsFrame(payload StatsPayload) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal stats payload: %w", err)
+	}
+	return fw.WriteFrame(StreamStats, data)
+}
+
 type FrameReader struct {
 	r io.Reader
 }
@@ -135,6 +157,14 @@ func ParseExitPayload(payload []byte) (*ExitPayload, error) {
 		return nil, err
 	}
 	return &exitPayload, nil
+}
+
+func ParseStatsPayload(payload []byte) (*StatsPayload, error) {
+	var stats StatsPayload
+	if err := json.Unmarshal(payload, &stats); err != nil {
+		return nil, err
+	}
+	return &stats, nil
 }
 
 func ParseWindowSize(payload []byte) (*WindowSize, error) {

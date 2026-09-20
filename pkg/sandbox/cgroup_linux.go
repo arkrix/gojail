@@ -2,146 +2,182 @@ package sandbox
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
-const cgroupRoot = "/sys/fs/cgroup"
-const gojailSubtree = "/sys/fs/cgroup/gojail"
+const defaultCgroupRoot = "/sys/fs/cgroup/gojail"
 
-// CgroupController manages cgroups v2 resource limits and state for a sandbox.
-type CgroupController struct {
-	id   string
-	path string
+// LiveStats contains instantaneous resource readings from cgroups v2.
+type LiveStats struct {
+	MemoryCurrentBytes int64
+	MemoryPeakBytes    int64
+	CPUUsageUS         int64
+	PIDsCurrent        int64
 }
 
-// NewCgroupController creates a dedicated cgroup directory for a sandbox.
+// CgroupController manages resource limits and monitoring via Cgroups v2.
+type CgroupController struct {
+	id         string
+	cgroupPath string
+	prevCPUUS  int64
+	prevTime   time.Time
+}
+
+// NewCgroupController initializes a new cgroup v2 group for a sandbox.
 func NewCgroupController(id string) (*CgroupController, error) {
-	if err := os.MkdirAll(gojailSubtree, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create base gojail cgroup: %w", err)
-	}
-
-	subtreeControl := filepath.Join(gojailSubtree, "cgroup.subtree_control")
-	if err := os.WriteFile(subtreeControl, []byte("+memory +pids +cpu"), 0644); err != nil {
-		_ = err
-	}
-
-	jailPath := filepath.Join(gojailSubtree, id)
-	if err := os.Mkdir(jailPath, 0755); err != nil && !os.IsExist(err) {
-		return nil, fmt.Errorf("failed to create sandbox cgroup %s: %w", id, err)
+	cgroupPath := filepath.Join(defaultCgroupRoot, id)
+	if err := os.MkdirAll(cgroupPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create cgroup directory %s: %w", cgroupPath, err)
 	}
 
 	return &CgroupController{
-		id:   id,
-		path: jailPath,
+		id:         id,
+		cgroupPath: cgroupPath,
+		prevTime:   time.Now(),
 	}, nil
 }
 
-// ApplyLimits writes memory and process ceilings to the cgroup.
-func (c *CgroupController) ApplyLimits(memoryLimitBytes, maxProcesses int64) error {
-	if memoryLimitBytes > 0 {
-		memFile := filepath.Join(c.path, "memory.max")
-		if err := os.WriteFile(memFile, []byte(strconv.FormatInt(memoryLimitBytes, 10)), 0644); err != nil {
-			return fmt.Errorf("failed to write memory.max: %w", err)
+// ApplyLimits configures memory and process limits.
+func (c *CgroupController) ApplyLimits(memLimitBytes int64, maxProcs int64) error {
+	if memLimitBytes > 0 {
+		memFile := filepath.Join(c.cgroupPath, "memory.max")
+		if err := os.WriteFile(memFile, []byte(strconv.FormatInt(memLimitBytes, 10)), 0644); err != nil {
+			return fmt.Errorf("failed to set memory.max: %w", err)
 		}
 	}
 
-	if maxProcesses > 0 {
-		pidsFile := filepath.Join(c.path, "pids.max")
-		if err := os.WriteFile(pidsFile, []byte(strconv.FormatInt(maxProcesses, 10)), 0644); err != nil {
-			return fmt.Errorf("failed to write pids.max: %w", err)
+	if maxProcs > 0 {
+		pidsFile := filepath.Join(c.cgroupPath, "pids.max")
+		if err := os.WriteFile(pidsFile, []byte(strconv.FormatInt(maxProcs, 10)), 0644); err != nil {
+			return fmt.Errorf("failed to set pids.max: %w", err)
 		}
 	}
 
 	return nil
 }
 
-// AttachPID assigns a process ID to this cgroup slice.
+// AttachPID associates a running host PID with this cgroup slice.
 func (c *CgroupController) AttachPID(pid int) error {
-	procsFile := filepath.Join(c.path, "cgroup.procs")
+	procsFile := filepath.Join(c.cgroupPath, "cgroup.procs")
 	if err := os.WriteFile(procsFile, []byte(strconv.Itoa(pid)), 0644); err != nil {
-		return fmt.Errorf("failed to attach pid %d to %s: %w", pid, procsFile, err)
+		return fmt.Errorf("failed to attach pid %d to cgroup: %w", pid, err)
 	}
 	return nil
 }
 
-// Freeze writes 1 to cgroup.freeze and waits until cgroup.events confirms frozen=1.
+// Freeze halts execution of all processes inside this cgroup.
 func (c *CgroupController) Freeze() error {
-	freezeFile := filepath.Join(c.path, "cgroup.freeze")
-	if err := os.WriteFile(freezeFile, []byte("1"), 0644); err != nil {
-		return fmt.Errorf("failed to write cgroup.freeze: %w", err)
-	}
-
-	eventsFile := filepath.Join(c.path, "cgroup.events")
-	deadline := time.Now().Add(500 * time.Millisecond)
-
-	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(eventsFile)
-		if err == nil && bytes.Contains(data, []byte("frozen 1")) {
-			return nil
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-
-	return nil
+	freezeFile := filepath.Join(c.cgroupPath, "cgroup.freeze")
+	return os.WriteFile(freezeFile, []byte("1"), 0644)
 }
 
-// Thaw writes 0 to cgroup.freeze to wake all processes in the cgroup.
+// Thaw resumes execution of frozen processes.
 func (c *CgroupController) Thaw() error {
-	freezeFile := filepath.Join(c.path, "cgroup.freeze")
-	if err := os.WriteFile(freezeFile, []byte("0"), 0644); err != nil {
-		return fmt.Errorf("failed to thaw cgroup: %w", err)
-	}
-	return nil
+	freezeFile := filepath.Join(c.cgroupPath, "cgroup.freeze")
+	return os.WriteFile(freezeFile, []byte("0"), 0644)
 }
 
-// ReadMetrics parses resource usage statistics from the cgroup files.
-func (c *CgroupController) ReadMetrics() ResourceMetrics {
-	var metrics ResourceMetrics
+// SampleStats samples current memory usage, peak memory, CPU time, and active pids.
+func (c *CgroupController) SampleStats() (LiveStats, float64, error) {
+	var stats LiveStats
 
-	// 1. Read peak memory usage; fallback to memory.current if memory.peak is absent
-	memData, err := os.ReadFile(filepath.Join(c.path, "memory.peak"))
-	if err != nil {
-		memData, _ = os.ReadFile(filepath.Join(c.path, "memory.current"))
-	}
-	if len(memData) > 0 {
-		val, parseErr := strconv.ParseInt(strings.TrimSpace(string(memData)), 10, 64)
-		if parseErr == nil {
-			metrics.PeakMemoryBytes = val
-		}
+	// 1. Current Memory
+	if data, err := os.ReadFile(filepath.Join(c.cgroupPath, "memory.current")); err == nil {
+		stats.MemoryCurrentBytes, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 	}
 
-	// 2. Read CPU stats from cpu.stat
-	cpuFile, err := os.Open(filepath.Join(c.path, "cpu.stat"))
-	if err == nil {
-		defer cpuFile.Close()
-		scanner := bufio.NewScanner(cpuFile)
+	// 2. Peak Memory
+	if data, err := os.ReadFile(filepath.Join(c.cgroupPath, "memory.peak")); err == nil {
+		stats.MemoryPeakBytes, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	}
+
+	// 3. Current PIDs
+	if data, err := os.ReadFile(filepath.Join(c.cgroupPath, "pids.current")); err == nil {
+		stats.PIDsCurrent, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	}
+
+	// 4. CPU Usage
+	var userUS, sysUS int64
+	if file, err := os.Open(filepath.Join(c.cgroupPath, "cpu.stat")); err == nil {
+		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
 			fields := strings.Fields(scanner.Text())
 			if len(fields) == 2 {
-				switch fields[0] {
-				case "user_usec":
+				if fields[0] == "user_usec" {
+					userUS, _ = strconv.ParseInt(fields[1], 10, 64)
+				} else if fields[0] == "system_usec" {
+					sysUS, _ = strconv.ParseInt(fields[1], 10, 64)
+				}
+			}
+		}
+		_ = file.Close()
+	}
+
+	totalCPUUS := userUS + sysUS
+	stats.CPUUsageUS = totalCPUUS
+
+	now := time.Now()
+	elapsedUS := now.Sub(c.prevTime).Microseconds()
+
+	var cpuPercent float64
+	if elapsedUS > 0 && c.prevCPUUS > 0 && totalCPUUS >= c.prevCPUUS {
+		deltaCPUUS := totalCPUUS - c.prevCPUUS
+		cpuPercent = (float64(deltaCPUUS) / float64(elapsedUS)) * 100.0
+	}
+
+	c.prevCPUUS = totalCPUUS
+	c.prevTime = now
+
+	return stats, cpuPercent, nil
+}
+
+// ReadMetrics parses final post-execution metrics from cgroup controllers.
+func (c *CgroupController) ReadMetrics() ResourceMetrics {
+	var metrics ResourceMetrics
+
+	// Peak memory
+	if data, err := os.ReadFile(filepath.Join(c.cgroupPath, "memory.peak")); err == nil {
+		metrics.PeakMemoryBytes, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	} else if data, err := os.ReadFile(filepath.Join(c.cgroupPath, "memory.current")); err == nil {
+		metrics.PeakMemoryBytes, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	}
+
+	// CPU times
+	if file, err := os.Open(filepath.Join(c.cgroupPath, "cpu.stat")); err == nil {
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) == 2 {
+				if fields[0] == "user_usec" {
 					metrics.UserCPUTimeUS, _ = strconv.ParseInt(fields[1], 10, 64)
-				case "system_usec":
+				} else if fields[0] == "system_usec" {
 					metrics.SystemCPUTimeUS, _ = strconv.ParseInt(fields[1], 10, 64)
 				}
 			}
 		}
+		_ = file.Close()
 	}
 
 	return metrics
 }
 
-// Cleanup removes the ephemeral leaf cgroup, thawing first if frozen.
+// Cleanup removes the cgroup slice directory after container termination.
 func (c *CgroupController) Cleanup() error {
-	_ = c.Thaw()
-	if err := os.Remove(c.path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove cgroup %s: %w", c.path, err)
+	procsFile := filepath.Join(c.cgroupPath, "cgroup.procs")
+	if data, err := os.ReadFile(procsFile); err == nil {
+		pids := strings.Fields(string(data))
+		for _, pidStr := range pids {
+			if pid, err := strconv.Atoi(pidStr); err == nil && pid > 0 {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
 	}
+	_ = os.Remove(c.cgroupPath)
 	return nil
 }

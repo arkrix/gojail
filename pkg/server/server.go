@@ -47,14 +47,12 @@ func NewDaemon(cfg *config.DaemonConfig) *Daemon {
 
 // Start acquires the daemon lock, executes crash recovery, warms sandboxes, and starts accepting requests.
 func (d *Daemon) Start() error {
-	// 1. Ensure single running daemon instance via advisory flock
 	lockFile, err := AcquireDaemonLock("/var/run/gojaild.pid")
 	if err != nil {
 		return fmt.Errorf("daemon start aborted: %w", err)
 	}
 	d.lockFile = lockFile
 
-	// 2. Perform crash recovery: sweep lingering mounts, scratch layers, and dead cgroups
 	if unmounted, err := SweepStaleMounts(defaultLayersDir); err != nil {
 		fmt.Fprintf(os.Stderr, "[recovery] Error sweeping mounts: %v\n", err)
 	} else if unmounted > 0 {
@@ -69,7 +67,6 @@ func (d *Daemon) Start() error {
 		fmt.Fprintf(os.Stderr, "[recovery] Error sweeping cgroups: %v\n", err)
 	}
 
-	// 3. Initialize standby sandbox pool
 	poolSize := d.cfg.Pool.WarmWorkers
 	if poolSize <= 0 {
 		poolSize = 2
@@ -86,7 +83,6 @@ func (d *Daemon) Start() error {
 	}
 	d.pool = pool
 
-	// 4. Bind Unix domain socket
 	socketPath := d.cfg.Server.SocketPath
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0755); err != nil {
 		return fmt.Errorf("failed to create socket directory: %w", err)
@@ -161,7 +157,6 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		return
 	}
 
-	// Dispatch non-streaming control commands ("list" / "stop")
 	switch req.Action {
 	case "list":
 		jobs := d.registry.List()
@@ -179,9 +174,12 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		}
 		_ = json.NewEncoder(conn).Encode(resp)
 		return
+
+	case "stats":
+		d.handleStatsStream(conn, frameWriter, req.TargetID)
+		return
 	}
 
-	// Default action: execute container workload
 	if req.Timeout == 0 {
 		req.Timeout = time.Duration(d.cfg.Defaults.TimeoutSec) * time.Second
 	}
@@ -212,8 +210,8 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		return
 	}
 
-	// Register active container instance in daemon registry
 	d.registry.Register(worker.ID, 0, req.Command, req.Args, cancel)
+	d.registry.AttachCgroup(worker.ID, worker.Cgroup(), req.MemoryLimitBytes, req.MaxProcesses)
 
 	var writeMu sync.Mutex
 
@@ -301,6 +299,71 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		TimedOut: res.TimedOut,
 		Metrics:  res.Metrics,
 	})
+}
+
+func (d *Daemon) handleStatsStream(conn net.Conn, fw *protocol.FrameWriter, targetID string) {
+	jobInfo, cg, memLim, procLim, exists := d.registry.GetJob(targetID)
+	if !exists {
+		_ = fw.WriteExitFrame(protocol.ExitPayload{
+			ExitCode: 1,
+			Error:    fmt.Sprintf("container %q not found", targetID),
+		})
+		return
+	}
+
+	if jobInfo.Status != "running" || cg == nil {
+		_ = fw.WriteStatsFrame(protocol.StatsPayload{
+			ContainerID:      targetID,
+			Timestamp:        time.Now(),
+			MemoryBytes:      jobInfo.PeakMemoryBytes,
+			MemoryLimitBytes: memLim,
+			PeakMemoryBytes:  jobInfo.PeakMemoryBytes,
+			PIDsLimit:        procLim,
+		})
+		_ = fw.WriteExitFrame(protocol.ExitPayload{ExitCode: 0})
+		return
+	}
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-d.shutdown:
+			return
+		case <-ticker.C:
+			currentJob, currentCG, curMemLim, curProcLim, ok := d.registry.GetJob(targetID)
+			if !ok || currentJob.Status != "running" || currentCG == nil {
+				_ = fw.WriteExitFrame(protocol.ExitPayload{ExitCode: 0})
+				return
+			}
+
+			live, cpuPercent, err := currentCG.SampleStats()
+			if err != nil {
+				_ = fw.WriteExitFrame(protocol.ExitPayload{
+					ExitCode: 1,
+					Error:    fmt.Sprintf("failed to read cgroup telemetry: %v", err),
+				})
+				return
+			}
+
+			payload := protocol.StatsPayload{
+				ContainerID:      targetID,
+				Timestamp:        time.Now(),
+				MemoryBytes:      live.MemoryCurrentBytes,
+				MemoryLimitBytes: curMemLim,
+				PeakMemoryBytes:  live.MemoryPeakBytes,
+				CPUUsageUS:       live.CPUUsageUS,
+				CPUPercent:       cpuPercent,
+				PIDsCurrent:      live.PIDsCurrent,
+				PIDsLimit:        curProcLim,
+			}
+
+			if err := fw.WriteStatsFrame(payload); err != nil {
+				return
+			}
+		}
+	}
 }
 
 // Stop gracefully terminates the listener, shuts down workers, and releases the PID lock.

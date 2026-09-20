@@ -7,11 +7,15 @@ import (
 	"time"
 
 	"github.com/arkrix/gojail/pkg/protocol"
+	"github.com/arkrix/gojail/pkg/sandbox"
 )
 
 type activeJob struct {
-	info   protocol.JobInfo
-	cancel context.CancelFunc
+	info    protocol.JobInfo
+	cancel  context.CancelFunc
+	cgroup  *sandbox.CgroupController
+	memLim  int64
+	procLim int64
 }
 
 // JobRegistry provides thread-safe runtime container tracking.
@@ -43,6 +47,30 @@ func (r *JobRegistry) Register(id string, pid int, cmd string, args []string, ca
 		},
 		cancel: cancel,
 	}
+}
+
+// AttachCgroup associates the active cgroup controller and resource limits with the job.
+func (r *JobRegistry) AttachCgroup(id string, cg *sandbox.CgroupController, memLimit, procLimit int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if job, exists := r.jobs[id]; exists {
+		job.cgroup = cg
+		job.memLim = memLimit
+		job.procLim = procLimit
+	}
+}
+
+// GetJob returns a copy of the job info and its active cgroup controller if present.
+func (r *JobRegistry) GetJob(id string) (protocol.JobInfo, *sandbox.CgroupController, int64, int64, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	job, exists := r.jobs[id]
+	if !exists {
+		return protocol.JobInfo{}, nil, 0, 0, false
+	}
+	return job.info, job.cgroup, job.memLim, job.procLim, true
 }
 
 // UpdatePID records the container host PID once spawned.
