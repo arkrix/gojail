@@ -29,6 +29,7 @@ type ExecOptions struct {
 	TTY              bool
 	Stdout           io.Writer
 	Stderr           io.Writer
+	SeccompProfile   string
 }
 
 // Response models the aggregate result returned to CLI callers.
@@ -78,6 +79,7 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 		StorageLimitMB   int64               `json:"storage_limit_mb"`
 		Mounts           []sandbox.MountSpec `json:"mounts,omitempty"`
 		TTY              bool                `json:"tty,omitempty"`
+		SeccompProfile   string              `json:"seccomp_profile,omitempty"`
 	}{
 		Command:          opts.Command,
 		Args:             opts.Args,
@@ -88,6 +90,7 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 		StorageLimitMB:   opts.StorageLimitMB,
 		Mounts:           opts.Mounts,
 		TTY:              opts.TTY,
+		SeccompProfile:   opts.SeccompProfile,
 	}
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {

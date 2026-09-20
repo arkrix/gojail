@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"unsafe"
 
+	"github.com/arkrix/gojail/pkg/seccomp"
 	"golang.org/x/sys/unix"
 )
 
@@ -47,11 +48,17 @@ func DropCapabilities() error {
 	return nil
 }
 
+// ApplySeccompFilter installs a configurable profile via pkg/seccomp,
+// falling back to the default denylist if no profile path is provided.
+func ApplySeccompFilter(profilePath string) error {
+	if profilePath != "" {
+		return seccomp.ApplyProfile(profilePath)
+	}
+	return ApplySeccompDenylist()
+}
+
 // ApplySeccompDenylist installs a raw BPF seccomp filter blocking high-risk syscalls.
-// Blocked calls immediately return EPERM (operation not permitted) rather than killing the jail,
-// giving predictable error states to AI workloads.
 func ApplySeccompDenylist() error {
-	// High-risk syscalls forbidden in untrusted AI sandbox environments
 	blockedSyscalls := []uint32{
 		uint32(unix.SYS_PTRACE),
 		uint32(unix.SYS_BPF),
@@ -71,7 +78,6 @@ func ApplySeccompDenylist() error {
 
 	var filter []bpfInstruction
 
-	// Load syscall number into accumulator: [A = seccomp_data.nr (offset 0)]
 	filter = append(filter, bpfInstruction{
 		code: bpfLd | bpfW | bpfAbs,
 		jt:   0,
@@ -79,7 +85,6 @@ func ApplySeccompDenylist() error {
 		k:    0,
 	})
 
-	// Check each blocked syscall against accumulator. If matched, jump to deny.
 	totalBlocked := len(blockedSyscalls)
 	for i, syscallNum := range blockedSyscalls {
 		jumpTrue := uint8(totalBlocked - i)
@@ -91,7 +96,6 @@ func ApplySeccompDenylist() error {
 		})
 	}
 
-	// Default: Allow execution
 	filter = append(filter, bpfInstruction{
 		code: bpfRet | bpfK,
 		jt:   0,
@@ -99,7 +103,6 @@ func ApplySeccompDenylist() error {
 		k:    unix.SECCOMP_RET_ALLOW,
 	})
 
-	// Deny target: Return EPERM errno
 	filter = append(filter, bpfInstruction{
 		code: bpfRet | bpfK,
 		jt:   0,
@@ -112,7 +115,6 @@ func ApplySeccompDenylist() error {
 		filter: &filter[0],
 	}
 
-	// Load BPF filter into the kernel
 	_, _, errno := unix.Syscall(
 		unix.SYS_PRCTL,
 		unix.PR_SET_SECCOMP,

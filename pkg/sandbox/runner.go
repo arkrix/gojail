@@ -257,15 +257,15 @@ func pivotRoot(newRoot string) error {
 	return nil
 }
 
-// dropPrivileges removes root capabilities and drops to nobody (65534).
-func dropPrivileges() error {
+// dropPrivileges removes root capabilities and applies seccomp filters.
+func dropPrivileges(seccompProfile string) error {
 	const unprivilegedUID = 65534
 	const unprivilegedGID = 65534
 
 	if err := DropCapabilities(); err != nil {
 		return fmt.Errorf("capability drop failed: %w", err)
 	}
-	if err := ApplySeccompDenylist(); err != nil {
+	if err := ApplySeccompFilter(seccompProfile); err != nil {
 		return fmt.Errorf("seccomp filter failed: %w", err)
 	}
 	if err := syscall.Setgroups([]int{unprivilegedGID}); err != nil {
@@ -312,7 +312,7 @@ func InitChild(cfgJSON string) error {
 
 	_ = configureLoopback()
 
-	if err := dropPrivileges(); err != nil {
+	if err := dropPrivileges(cfg.SeccompProfile); err != nil {
 		return fmt.Errorf("child: privilege drop failed: %w", err)
 	}
 

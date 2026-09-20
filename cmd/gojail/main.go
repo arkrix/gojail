@@ -61,7 +61,6 @@ func main() {
 }
 
 func handleRunCommand(args []string) {
-	// Pre-process args to expand "-it" into "-i" and "-t" if present
 	var normalizedArgs []string
 	for _, a := range args {
 		if a == "-it" {
@@ -82,6 +81,7 @@ func handleRunCommand(args []string) {
 	socketPath := fs.String("socket", "/var/run/gojail.sock", "Path to gojaild socket")
 	interactive := fs.Bool("i", false, "Keep STDIN open")
 	tty := fs.Bool("t", false, "Allocate a pseudo-TTY")
+	seccompProfile := fs.String("seccomp", "", "Path to custom JSON seccomp profile")
 
 	var volumes volumeFlags
 	fs.Var(&volumes, "v", "Volume bind mount: host_dir:jail_target[:ro|rw]")
@@ -128,7 +128,7 @@ func handleRunCommand(args []string) {
 
 	timeoutDur := time.Duration(*timeoutSec) * time.Second
 	if isInteractive && timeoutDur == 0 {
-		timeoutDur = 1 * time.Hour // Sane fallback for interactive shell
+		timeoutDur = 1 * time.Hour
 	}
 
 	c := client.NewClient(*socketPath)
@@ -144,6 +144,7 @@ func handleRunCommand(args []string) {
 		TTY:              isInteractive,
 		Stdout:           os.Stdout,
 		Stderr:           os.Stderr,
+		SeccompProfile:   *seccompProfile,
 	}
 
 	resp, err := c.Run(opts)
@@ -178,6 +179,7 @@ func handleDirectCommand(args []string) {
 	memMB := fs.Int64("mem", 128, "Memory ceiling in megabytes")
 	procsMax := fs.Int64("procs", 32, "Maximum allowed processes")
 	storageMB := fs.Int64("storage", 64, "Storage ceiling in megabytes")
+	seccompProfile := fs.String("seccomp", "", "Path to custom JSON seccomp profile")
 
 	var volumes volumeFlags
 	fs.Var(&volumes, "v", "Volume bind mount: host_dir:jail_target[:ro|rw]")
@@ -215,6 +217,7 @@ func handleDirectCommand(args []string) {
 		Args:             []string{"-c", scriptBody},
 		Env:              []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/tmp"},
 		Mounts:           mountSpecs,
+		SeccompProfile:   *seccompProfile,
 	}
 
 	runner := sandbox.NewRunner(cfg)
@@ -247,4 +250,5 @@ func printUsage() {
 	fmt.Println("  -storage int   Scratch storage ceiling in MB (default 64)")
 	fmt.Println("  -timeout int   Timeout in seconds (default 5)")
 	fmt.Println("  -metrics       Print peak memory and CPU telemetry")
+	fmt.Println("  -seccomp path  Path to custom JSON seccomp profile")
 }

@@ -100,11 +100,15 @@ func LoadConfig(path string) (*DaemonConfig, error) {
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cfg.Server.SocketPath), 0755); err != nil {
-		return nil, fmt.Errorf("failed to ensure socket directory: %w", err)
+		if os.Geteuid() == 0 {
+			return nil, fmt.Errorf("failed to ensure socket directory: %w", err)
+		}
 	}
 
 	if err := os.MkdirAll(cfg.Storage.LayersDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to ensure layers directory: %w", err)
+		if os.Geteuid() == 0 {
+			return nil, fmt.Errorf("failed to ensure layers directory: %w", err)
+		}
 	}
 
 	return cfg, nil

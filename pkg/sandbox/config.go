@@ -84,6 +84,7 @@ type Config struct {
 	Rootfs           string        `json:"rootfs,omitempty"`
 	Mounts           []MountSpec   `json:"mounts,omitempty"`
 	TTY              bool          `json:"tty,omitempty"`
+	SeccompProfile   string        `json:"seccomp_profile,omitempty"`
 }
 
 // Result holds standard output, errors, execution timings, and resource telemetry.
