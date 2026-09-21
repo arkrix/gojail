@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-and-vuln:
+    name: Lint & Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Verify Formatting
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "The following files are not formatted properly:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: Go Vet
+        run: go vet ./...
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Run Unit Tests
+        run: go test -v -race ./pkg/...
+
+  integration-tests:
+    name: Root Integration & Cgroup Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Setup Cgroups v2 Subtree Delegation
+        run: |
+          if [ -f /sys/fs/cgroup/cgroup.subtree_control ]; then
+            sudo sh -c "echo '+memory +pids +cpu' > /sys/fs/cgroup/cgroup.subtree_control" || true
+          fi
+
+      - name: Run Sandbox Root Integration Tests
+        run: sudo -E env "PATH=$PATH" go test -v ./pkg/sandbox/...
+
+      - name: Run Server Recovery Root Tests
+        run: sudo -E env "PATH=$PATH" go test -v ./pkg/server/...
+
+  build:
+    name: Cross-Architecture Builds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Build Linux amd64
+        env:
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -v -o bin/gojail-amd64 ./cmd/gojail
+          go build -v -o bin/gojaild-amd64 ./cmd/gojaild
+
+      - name: Build Linux arm64
+        env:
+          GOOS: linux
+          GOARCH: arm64
+        run: |
+          go build -v -o bin/gojail-arm64 ./cmd/gojail
+          go build -v -o bin/gojaild-arm64 ./cmd/gojaild
+          
