@@ -110,13 +110,13 @@ func actionToValue(act Action, errnoVal uint32) uint32 {
 
 func compileBPF(profile *Profile) ([]bpfInstruction, error) {
 	const (
-		bpfLd   = 0x00
-		bpfW    = 0x00
-		bpfAbs  = 0x20
-		bpfJmp  = 0x05
-		bpfJeq  = 0x10
-		bpfK    = 0x00
-		bpfRet  = 0x06
+		bpfLd  = 0x00
+		bpfW   = 0x00
+		bpfAbs = 0x20
+		bpfJmp = 0x05
+		bpfJeq = 0x10
+		bpfK   = 0x00
+		bpfRet = 0x06
 	)
 
 	const (

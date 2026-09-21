@@ -31,6 +31,18 @@ type CgroupController struct {
 
 // NewCgroupController initializes a new cgroup v2 group for a sandbox.
 func NewCgroupController(id string) (*CgroupController, error) {
+	if err := os.MkdirAll(defaultCgroupRoot, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create base cgroup root %s: %w", defaultCgroupRoot, err)
+	}
+
+	subtreeControl := filepath.Join(defaultCgroupRoot, "cgroup.subtree_control")
+	if data, err := os.ReadFile(filepath.Join(defaultCgroupRoot, "cgroup.controllers")); err == nil {
+		controllers := strings.Fields(string(data))
+		for _, ctrl := range controllers {
+			_ = os.WriteFile(subtreeControl, []byte("+"+ctrl), 0644)
+		}
+	}
+
 	cgroupPath := filepath.Join(defaultCgroupRoot, id)
 	if err := os.MkdirAll(cgroupPath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create cgroup directory %s: %w", cgroupPath, err)
@@ -87,22 +99,18 @@ func (c *CgroupController) Thaw() error {
 func (c *CgroupController) SampleStats() (LiveStats, float64, error) {
 	var stats LiveStats
 
-	// 1. Current Memory
 	if data, err := os.ReadFile(filepath.Join(c.cgroupPath, "memory.current")); err == nil {
 		stats.MemoryCurrentBytes, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 	}
 
-	// 2. Peak Memory
 	if data, err := os.ReadFile(filepath.Join(c.cgroupPath, "memory.peak")); err == nil {
 		stats.MemoryPeakBytes, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 	}
 
-	// 3. Current PIDs
 	if data, err := os.ReadFile(filepath.Join(c.cgroupPath, "pids.current")); err == nil {
 		stats.PIDsCurrent, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 	}
 
-	// 4. CPU Usage
 	var userUS, sysUS int64
 	if file, err := os.Open(filepath.Join(c.cgroupPath, "cpu.stat")); err == nil {
 		scanner := bufio.NewScanner(file)
@@ -141,14 +149,12 @@ func (c *CgroupController) SampleStats() (LiveStats, float64, error) {
 func (c *CgroupController) ReadMetrics() ResourceMetrics {
 	var metrics ResourceMetrics
 
-	// Peak memory
 	if data, err := os.ReadFile(filepath.Join(c.cgroupPath, "memory.peak")); err == nil {
 		metrics.PeakMemoryBytes, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 	} else if data, err := os.ReadFile(filepath.Join(c.cgroupPath, "memory.current")); err == nil {
 		metrics.PeakMemoryBytes, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 	}
 
-	// CPU times
 	if file, err := os.Open(filepath.Join(c.cgroupPath, "cpu.stat")); err == nil {
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {

@@ -3,8 +3,8 @@ package server
 import (
 	"os"
 	"path/filepath"
-	"testing"
 	"syscall"
+	"testing"
 )
 
 func TestAcquireDaemonLock_Exclusive(t *testing.T) {

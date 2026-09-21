@@ -66,11 +66,25 @@ jobs:
           go-version: '1.22'
           cache: true
 
-      - name: Setup Cgroups v2 Subtree Delegation
+      - name: Setup Cgroups v2 Delegation
         run: |
+          # 1. Enable controllers on root cgroup
           if [ -f /sys/fs/cgroup/cgroup.subtree_control ]; then
-            sudo sh -c "echo '+memory +pids +cpu' > /sys/fs/cgroup/cgroup.subtree_control" || true
+            for ctl in memory pids cpu; do
+              sudo sh -c "echo +$ctl > /sys/fs/cgroup/cgroup.subtree_control" 2>/dev/null || true
+            done
           fi
+
+          # 2. Pre-create gojail root slice and delegate controllers
+          sudo mkdir -p /sys/fs/cgroup/gojail
+          if [ -f /sys/fs/cgroup/gojail/cgroup.subtree_control ]; then
+            for ctl in memory pids cpu; do
+              sudo sh -c "echo +$ctl > /sys/fs/cgroup/gojail/cgroup.subtree_control" 2>/dev/null || true
+            done
+          fi
+
+          # 3. Ensure permissions across the cgroup hierarchy
+          sudo chmod -R 777 /sys/fs/cgroup/gojail 2>/dev/null || true
 
       - name: Run Sandbox Root Integration Tests
         run: sudo -E env "PATH=$PATH" go test -v ./pkg/sandbox/...

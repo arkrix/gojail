@@ -5,24 +5,40 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
     commit-message:
-      prefix: "chore(deps)"
+      prefix: "chore"
       include: "scope"
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
       - "go"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
 
   # Maintain GitHub Actions dependencies
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
     commit-message:
-      prefix: "chore(ci)"
+      prefix: "ci"
       include: "scope"
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
       - "ci"
-      
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      actions-dependencies:
+        patterns:
+          - "*"
+          
