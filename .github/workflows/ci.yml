@@ -18,7 +18,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-          cache: true
+          cache: false
 
       - name: Verify Formatting
         run: |
@@ -48,7 +48,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-          cache: true
+          cache: false
 
       - name: Run Unit Tests
         run: go test -v -race ./pkg/...
@@ -64,11 +64,11 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-          cache: true
+          cache: false
 
       - name: Setup Cgroups v2 Delegation
         run: |
-          # 1. Enable controllers on root cgroup
+          # 1. Enable controllers on root cgroup if possible
           if [ -f /sys/fs/cgroup/cgroup.subtree_control ]; then
             for ctl in memory pids cpu; do
               sudo sh -c "echo +$ctl > /sys/fs/cgroup/cgroup.subtree_control" 2>/dev/null || true
@@ -87,10 +87,10 @@ jobs:
           sudo chmod -R 777 /sys/fs/cgroup/gojail 2>/dev/null || true
 
       - name: Run Sandbox Root Integration Tests
-        run: sudo -E env "PATH=$PATH" go test -v ./pkg/sandbox/...
+        run: sudo -E env "PATH=$PATH" "GOCACHE=/tmp/go-build" "GOPATH=/tmp/go" go test -v ./pkg/sandbox/...
 
       - name: Run Server Recovery Root Tests
-        run: sudo -E env "PATH=$PATH" go test -v ./pkg/server/...
+        run: sudo -E env "PATH=$PATH" "GOCACHE=/tmp/go-build" "GOPATH=/tmp/go" go test -v ./pkg/server/...
 
   build:
     name: Cross-Architecture Builds
@@ -103,7 +103,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-          cache: true
+          cache: false
 
       - name: Build Linux amd64
         env:
