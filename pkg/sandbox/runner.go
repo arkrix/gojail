@@ -167,17 +167,26 @@ func mountDevNodes(targetRoot string) error {
 		src := filepath.Join("/dev", f)
 		dst := filepath.Join(devPath, f)
 
-		if _, err := os.Stat(src); os.IsNotExist(err) {
+		if _, err := os.Stat(src); err != nil {
 			continue
 		}
 
-		touchFile, err := os.OpenFile(dst, os.O_CREATE|os.O_RDONLY, 0666)
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			return err
+		}
+		touchFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 		if err != nil {
+			if f == "tty" {
+				continue
+			}
 			return fmt.Errorf("failed to touch %s: %w", dst, err)
 		}
 		_ = touchFile.Close()
 
 		if err := syscall.Mount(src, dst, "", syscall.MS_BIND, ""); err != nil {
+			if f == "tty" {
+				continue
+			}
 			return fmt.Errorf("failed to bind mount %s: %w", dst, err)
 		}
 	}
