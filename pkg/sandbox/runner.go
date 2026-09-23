@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/arkrix/gojail/pkg/network"
 	"golang.org/x/sys/unix"
 )
 
@@ -35,6 +36,9 @@ func NewRunner(cfg Config) *Runner {
 	}
 	if cfg.StorageLimitMB == 0 {
 		cfg.StorageLimitMB = 64
+	}
+	if cfg.NetworkMode == "" {
+		cfg.NetworkMode = "none"
 	}
 
 	return &Runner{cfg: cfg}
@@ -105,9 +109,23 @@ func (r *Runner) Run() (*Result, error) {
 		return nil, fmt.Errorf("failed to start containerized child: %w", err)
 	}
 
-	if err := cg.AttachPID(cmd.Process.Pid); err != nil {
+	childPid := cmd.Process.Pid
+
+	// Attach PID to cgroup immediately
+	if err := cg.AttachPID(childPid); err != nil {
 		_ = cmd.Process.Kill()
 		return nil, fmt.Errorf("failed to bind process to cgroup: %w", err)
+	}
+
+	// 3. Provision veth pair and attach to host bridge if network is requested
+	var netMgr *network.Manager
+	if r.cfg.NetworkMode == "bridge" {
+		netMgr = network.NewManager()
+		if err := netMgr.SetupContainerNetwork(r.cfg.ID, childPid, r.cfg.RootPath); err != nil {
+			_ = cmd.Process.Kill()
+			return nil, fmt.Errorf("failed to setup container networking: %w", err)
+		}
+		defer netMgr.CleanupHostInterface(r.cfg.ID)
 	}
 
 	waitErr := cmd.Wait()
@@ -142,7 +160,7 @@ func (r *Runner) Run() (*Result, error) {
 	}, nil
 }
 
-// configureLoopback activates 'lo' interface inside the new network namespace
+// configureLoopback activates 'lo' interface inside the new network namespace.
 func configureLoopback() error {
 	lo, err := net.InterfaceByName("lo")
 	if err != nil {
@@ -234,7 +252,6 @@ func applyCustomMounts(targetRoot string, mounts []MountSpec) error {
 
 // pivotRoot executes pivot_root to replace the root filesystem and unmount old root.
 func pivotRoot(newRoot string) error {
-	// Ensure newRoot is a mountpoint by bind-mounting onto itself
 	if err := syscall.Mount(newRoot, newRoot, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
 		return fmt.Errorf("failed to bind-mount new root %s onto itself: %w", newRoot, err)
 	}
@@ -244,25 +261,20 @@ func pivotRoot(newRoot string) error {
 		return fmt.Errorf("failed to create oldroot dir %s: %w", oldRoot, err)
 	}
 
-	// Pivot root filesystem via unix.PivotRoot
 	if err := unix.PivotRoot(newRoot, oldRoot); err != nil {
 		return fmt.Errorf("unix pivot_root failed: %w", err)
 	}
 
-	// Switch working directory to the new root
 	if err := os.Chdir("/"); err != nil {
 		return fmt.Errorf("chdir / after pivot_root failed: %w", err)
 	}
 
-	// Detach and unmount the old host root
 	oldRootPath := "/.oldroot"
 	if err := syscall.Unmount(oldRootPath, syscall.MNT_DETACH); err != nil {
 		return fmt.Errorf("failed to unmount old root %s: %w", oldRootPath, err)
 	}
 
-	// Remove the temporary mount point directory
 	_ = os.Remove(oldRootPath)
-
 	return nil
 }
 
@@ -296,7 +308,6 @@ func InitChild(cfgJSON string) error {
 		return fmt.Errorf("child: failed to parse config: %w", err)
 	}
 
-	// Make host mount table private to prevent leakage back to host
 	if err := syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("child: failed to make root private: %w", err)
 	}
@@ -314,7 +325,6 @@ func InitChild(cfgJSON string) error {
 		return fmt.Errorf("child: failed to apply volume mounts: %w", err)
 	}
 
-	// Enforce true root isolation via pivot_root
 	if err := pivotRoot(targetRoot); err != nil {
 		return fmt.Errorf("child: pivot_root failed: %w", err)
 	}

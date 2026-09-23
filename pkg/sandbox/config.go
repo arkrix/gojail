@@ -70,6 +70,13 @@ func ParseMountSpec(spec string) (*MountSpec, error) {
 	}, nil
 }
 
+// PortMapping defines host-to-container port forwarding rules for bridge networking.
+type PortMapping struct {
+	HostPort      int    `json:"host_port"`
+	ContainerPort int    `json:"container_port"`
+	Protocol      string `json:"protocol"` // "tcp" or "udp"
+}
+
 // Config defines the constraints and execution parameters for a sandbox run.
 type Config struct {
 	ID               string        `json:"id"`
@@ -85,6 +92,8 @@ type Config struct {
 	Mounts           []MountSpec   `json:"mounts,omitempty"`
 	TTY              bool          `json:"tty,omitempty"`
 	SeccompProfile   string        `json:"seccomp_profile,omitempty"`
+	NetworkMode      string        `json:"network_mode,omitempty"` // "none" (air-gapped) or "bridge" (veth + outbound NAT)
+	PortMappings     []PortMapping `json:"port_mappings,omitempty"`
 }
 
 // Result holds standard output, errors, execution timings, and resource telemetry.

@@ -37,3 +37,4 @@ config.local.yaml
 # Temporary build/log artifacts
 *.log
 /tmp/
+*:Zone.Identifier
