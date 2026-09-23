@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
@@ -20,7 +22,14 @@ const (
 	DefaultSubnetIP   = "10.200.0."
 )
 
-// Manager coordinates host bridge devices and container veth pairings.
+// PortMapping defines host-to-container port forwarding rules for bridge networking.
+type PortMapping struct {
+	HostPort      int    `json:"host_port"`
+	ContainerPort int    `json:"container_port"`
+	Protocol      string `json:"protocol"` // "tcp" or "udp"
+}
+
+// Manager coordinates host bridge devices, container veth pairings, and NAT/DNAT routing.
 type Manager struct {
 	bridgeName string
 	bridgeCIDR string
@@ -77,9 +86,16 @@ func (m *Manager) EnsureBridge() (*netlink.Bridge, error) {
 	return br, nil
 }
 
+// CalculateContainerIP calculates a deterministic IPv4 address based on the container ID.
+func CalculateContainerIP(containerID string) string {
+	hash := sha256.Sum256([]byte(containerID))
+	ipSuffix := (int(hash[0]) % 252) + 2
+	return fmt.Sprintf("%s%d", DefaultSubnetIP, ipSuffix)
+}
+
 // SetupContainerNetwork provisions a veth pair, attaches host end to bridge,
-// moves container end into child PID's netns, and sets up routes and DNS.
-func (m *Manager) SetupContainerNetwork(containerID string, pid int, rootfs string) error {
+// moves container end into child PID's netns, configures routes, DNS, and port forwardings.
+func (m *Manager) SetupContainerNetwork(containerID string, pid int, rootfs string, portMappings []PortMapping) error {
 	br, err := m.EnsureBridge()
 	if err != nil {
 		return fmt.Errorf("failed to ensure bridge: %w", err)
@@ -124,14 +140,21 @@ func (m *Manager) SetupContainerNetwork(containerID string, pid int, rootfs stri
 		return fmt.Errorf("failed to move peer veth into pid %d netns: %w", pid, err)
 	}
 
-	// Compute deterministic container IP based on short ID hash (range: 2 to 254)
-	ipSuffix := (int(hash[0]) % 252) + 2
-	containerIP := fmt.Sprintf("%s%d/24", DefaultSubnetIP, ipSuffix)
+	rawIP := CalculateContainerIP(containerID)
+	containerCIDR := rawIP + "/24"
 
 	// Configure inside the container's network namespace
-	if err := configureInNetns(pid, vethPeerName, containerIP, "10.200.0.1"); err != nil {
+	if err := configureInNetns(pid, vethPeerName, containerCIDR, "10.200.0.1"); err != nil {
 		_ = netlink.LinkDel(veth)
 		return fmt.Errorf("failed to configure network inside container netns: %w", err)
+	}
+
+	// Apply Inbound Port Forwarding (DNAT) rules on the host
+	if len(portMappings) > 0 {
+		if err := m.applyPortForwarding(rawIP, portMappings); err != nil {
+			_ = netlink.LinkDel(veth)
+			return fmt.Errorf("failed to apply port forwarding rules: %w", err)
+		}
 	}
 
 	// Inject trusted DNS into container rootfs
@@ -140,6 +163,60 @@ func (m *Manager) SetupContainerNetwork(containerID string, pid int, rootfs stri
 	}
 
 	return nil
+}
+
+// applyPortForwarding adds iptables DNAT rules for external and host-local ingress.
+func (m *Manager) applyPortForwarding(containerIP string, mappings []PortMapping) error {
+	for _, mapping := range mappings {
+		proto := strings.ToLower(mapping.Protocol)
+		if proto == "" {
+			proto = "tcp"
+		}
+		if proto != "tcp" && proto != "udp" {
+			return fmt.Errorf("unsupported protocol %q, must be tcp or udp", proto)
+		}
+
+		hostPortStr := strconv.Itoa(mapping.HostPort)
+		targetStr := fmt.Sprintf("%s:%d", containerIP, mapping.ContainerPort)
+
+		// 1. Ingress rule for external network traffic arriving at host
+		cmdPrerouting := exec.Command("iptables", "-t", "nat", "-A", "PREROUTING",
+			"-p", proto, "--dport", hostPortStr,
+			"-j", "DNAT", "--to-destination", targetStr)
+		if out, err := cmdPrerouting.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to add PREROUTING DNAT rule: %s (%w)", string(out), err)
+		}
+
+		// 2. Ingress rule for local host processes connecting to localhost:port
+		cmdOutput := exec.Command("iptables", "-t", "nat", "-A", "OUTPUT",
+			"-p", proto, "-d", "127.0.0.1", "--dport", hostPortStr,
+			"-j", "DNAT", "--to-destination", targetStr)
+		_ = cmdOutput.Run()
+	}
+	return nil
+}
+
+// removePortForwarding tears down the iptables DNAT rules when the container terminates.
+func (m *Manager) removePortForwarding(containerIP string, mappings []PortMapping) {
+	for _, mapping := range mappings {
+		proto := strings.ToLower(mapping.Protocol)
+		if proto == "" {
+			proto = "tcp"
+		}
+
+		hostPortStr := strconv.Itoa(mapping.HostPort)
+		targetStr := fmt.Sprintf("%s:%d", containerIP, mapping.ContainerPort)
+
+		// Delete PREROUTING rule
+		_ = exec.Command("iptables", "-t", "nat", "-D", "PREROUTING",
+			"-p", proto, "--dport", hostPortStr,
+			"-j", "DNAT", "--to-destination", targetStr).Run()
+
+		// Delete OUTPUT rule
+		_ = exec.Command("iptables", "-t", "nat", "-D", "OUTPUT",
+			"-p", proto, "-d", "127.0.0.1", "--dport", hostPortStr,
+			"-j", "DNAT", "--to-destination", targetStr).Run()
+	}
 }
 
 // configureInNetns executes link setup and default route inside the child namespace.
@@ -231,8 +308,15 @@ func injectResolvConf(rootfs string) error {
 	return os.WriteFile(resolvPath, []byte(data), 0644)
 }
 
-// CleanupHostInterface removes the host-side veth device when container terminates.
-func (m *Manager) CleanupHostInterface(containerID string) {
+// Cleanup cleans up the host veth link and any DNAT rules configured for the container.
+func (m *Manager) Cleanup(containerID string, portMappings []PortMapping) {
+	// 1. Remove iptables port forwarding rules
+	if len(portMappings) > 0 {
+		rawIP := CalculateContainerIP(containerID)
+		m.removePortForwarding(rawIP, portMappings)
+	}
+
+	// 2. Remove host veth interface
 	hash := sha256.Sum256([]byte(containerID))
 	shortID := hex.EncodeToString(hash[:])[:7]
 	vethHostName := "veth" + shortID

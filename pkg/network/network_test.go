@@ -7,6 +7,22 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+func TestCalculateContainerIP(t *testing.T) {
+	ip1 := CalculateContainerIP("container-1")
+	ip2 := CalculateContainerIP("container-1")
+	ip3 := CalculateContainerIP("container-2")
+
+	if ip1 != ip2 {
+		t.Errorf("expected deterministic IP for same container, got %s and %s", ip1, ip2)
+	}
+
+	if ip1 == "" || len(ip1) < 8 {
+		t.Errorf("invalid calculated IP %s", ip1)
+	}
+
+	_ = ip3
+}
+
 func TestEnsureBridge(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("skipping bridge test; requires root permissions")
@@ -27,7 +43,6 @@ func TestEnsureBridge(t *testing.T) {
 		t.Errorf("expected bridge name %s, got %s", mgr.bridgeName, link.Attrs().Name)
 	}
 
-	// Verify IP address on bridge
 	addrs, err := netlink.AddrList(br, netlink.FAMILY_V4)
 	if err != nil || len(addrs) == 0 {
 		t.Fatalf("expected IPv4 address on bridge, found none")

@@ -117,15 +117,14 @@ func (r *Runner) Run() (*Result, error) {
 		return nil, fmt.Errorf("failed to bind process to cgroup: %w", err)
 	}
 
-	// 3. Provision veth pair and attach to host bridge if network is requested
-	var netMgr *network.Manager
+	// 3. Provision veth pair, bridge routing, and port forwarding if requested
 	if r.cfg.NetworkMode == "bridge" {
-		netMgr = network.NewManager()
-		if err := netMgr.SetupContainerNetwork(r.cfg.ID, childPid, r.cfg.RootPath); err != nil {
+		netMgr := network.NewManager()
+		if err := netMgr.SetupContainerNetwork(r.cfg.ID, childPid, r.cfg.RootPath, r.cfg.PortMappings); err != nil {
 			_ = cmd.Process.Kill()
 			return nil, fmt.Errorf("failed to setup container networking: %w", err)
 		}
-		defer netMgr.CleanupHostInterface(r.cfg.ID)
+		defer netMgr.Cleanup(r.cfg.ID, r.cfg.PortMappings)
 	}
 
 	waitErr := cmd.Wait()
