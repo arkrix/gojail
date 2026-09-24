@@ -220,7 +220,8 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		initialCmd = append(initialCmd, req.Args...)
 	}
 
-	worker, err := d.pool.AcquireCustom(req.StorageLimitMB, req.Mounts, req.TTY, initialCmd)
+	requiresNetwork := req.NetworkMode == "bridge" || len(req.PortMappings) > 0 || len(req.DNSServers) > 0
+	worker, err := d.pool.AcquireCustom(req.StorageLimitMB, req.Mounts, req.TTY, initialCmd, requiresNetwork)
 	if err != nil {
 		_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
 			ExitCode: 1,
@@ -230,9 +231,10 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	}
 
 	// Setup bridge network & port forwarding if requested
-	if req.NetworkMode == "bridge" || len(req.PortMappings) > 0 {
+	if requiresNetwork {
 		netMgr := network.NewManager()
 		if err := netMgr.SetupContainerNetwork(worker.ID, worker.PID(), worker.RootPath(), req.PortMappings, req.DNSServers); err != nil {
+			worker.Destroy()
 			d.registry.UpdateFinished(worker.ID, 1, 0, false)
 			_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
 				ExitCode: 1,

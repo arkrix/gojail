@@ -23,8 +23,8 @@ func TestIntegration_PTYInteractiveExecution(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Acquire custom interactive worker
-	worker, err := pool.AcquireCustom(16, nil, true, []string{"/bin/sh"})
+	// Acquire custom interactive worker (non-networked)
+	worker, err := pool.AcquireCustom(16, nil, true, []string{"/bin/sh"}, false)
 	if err != nil {
 		t.Fatalf("failed to acquire pty worker: %v", err)
 	}

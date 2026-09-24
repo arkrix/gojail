@@ -47,6 +47,35 @@ func (w *Worker) RootPath() string {
 	return w.rootPath
 }
 
+// Destroy forcefully terminates the worker and frees associated cgroup and overlay resources.
+func (w *Worker) Destroy() {
+	if w.cgroup != nil {
+		_ = w.cgroup.Thaw()
+	}
+	if w.stdin != nil {
+		_ = w.stdin.Close()
+	}
+	if w.stdoutR != nil {
+		_ = w.stdoutR.Close()
+	}
+	if w.stderrR != nil {
+		_ = w.stderrR.Close()
+	}
+	if w.ptyMaster != nil {
+		_ = w.ptyMaster.Close()
+	}
+	if w.cmd != nil && w.cmd.Process != nil {
+		_ = w.cmd.Process.Kill()
+		_ = w.cmd.Wait()
+	}
+	if w.cgroup != nil {
+		_ = w.cgroup.Cleanup()
+	}
+	if w.overlay != nil {
+		_ = w.overlay.Cleanup()
+	}
+}
+
 // Pool maintains a standby pool of warmed sandbox processes.
 type Pool struct {
 	mu             sync.Mutex
@@ -256,22 +285,23 @@ func (p *Pool) spawnWorker(storageMB int64, mounts []MountSpec, isTTY bool, init
 
 // Acquire pulls an idle worker from the pool or spawns a fallback.
 func (p *Pool) Acquire() (*Worker, error) {
-	return p.AcquireCustom(p.storageLimitMB, nil, false, nil)
+	return p.AcquireCustom(p.storageLimitMB, nil, false, nil, false)
 }
 
-// AcquireWithStorage delegates to AcquireCustom with nil mounts and non-TTY.
+// AcquireWithStorage delegates to AcquireCustom with nil mounts, non-TTY, and air-gapped net.
 func (p *Pool) AcquireWithStorage(requestedMB int64) (*Worker, error) {
-	return p.AcquireCustom(requestedMB, nil, false, nil)
+	return p.AcquireCustom(requestedMB, nil, false, nil, false)
 }
 
 // AcquireCustom returns a warm worker if specs match defaults, or spawns an on-demand custom worker.
-func (p *Pool) AcquireCustom(requestedMB int64, mounts []MountSpec, isTTY bool, cmd []string) (*Worker, error) {
+// When requiresNetwork is true, an on-demand worker is always spawned so warm workers remain clean and air-gapped.
+func (p *Pool) AcquireCustom(requestedMB int64, mounts []MountSpec, isTTY bool, cmd []string, requiresNetwork bool) (*Worker, error) {
 	if requestedMB <= 0 {
 		requestedMB = p.storageLimitMB
 	}
 
-	// Warm pool workers are batch / non-TTY with default storage and no custom mounts
-	if !isTTY && len(mounts) == 0 && requestedMB == p.storageLimitMB {
+	// Warm pool workers are batch / non-TTY, air-gapped with default storage and no custom mounts
+	if !isTTY && !requiresNetwork && len(mounts) == 0 && requestedMB == p.storageLimitMB {
 		select {
 		case w := <-p.workers:
 			go p.replenish()
@@ -281,7 +311,7 @@ func (p *Pool) AcquireCustom(requestedMB int64, mounts []MountSpec, isTTY bool, 
 		}
 	}
 
-	// Interactive TTY, custom mounts, or custom limits require an on-demand worker
+	// Interactive TTY, custom mounts, network-bridged jobs, or custom limits require an on-demand worker
 	return p.spawnWorker(requestedMB, mounts, isTTY, cmd)
 }
 
