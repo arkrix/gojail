@@ -88,7 +88,6 @@ func (r *Runner) Run() (*Result, error) {
 		return nil, fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	// Create synchronization pipe so child waits for host setup (e.g. networking)
 	syncR, syncW, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sync pipe: %w", err)
@@ -96,11 +95,8 @@ func (r *Runner) Run() (*Result, error) {
 	defer syncW.Close()
 
 	cmd := exec.CommandContext(ctx, selfBin, "__init_child__", string(cfgBytes))
-
-	// Pass sync reader as FD 3 (first ExtraFile)
 	cmd.ExtraFiles = []*os.File{syncR}
 
-	// Allocate new namespaces: Mount, PID, UTS, IPC, Network
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWNS |
 			syscall.CLONE_NEWPID |
@@ -120,12 +116,10 @@ func (r *Runner) Run() (*Result, error) {
 		return nil, fmt.Errorf("failed to start containerized child: %w", err)
 	}
 
-	// Close parent's copy of the read end
 	_ = syncR.Close()
 
 	childPid := cmd.Process.Pid
 
-	// Attach PID to cgroup immediately
 	if err := cg.AttachPID(childPid); err != nil {
 		_ = cmd.Process.Kill()
 		return nil, fmt.Errorf("failed to bind process to cgroup: %w", err)
@@ -141,7 +135,7 @@ func (r *Runner) Run() (*Result, error) {
 		defer netMgr.Cleanup(r.cfg.ID, r.cfg.PortMappings)
 	}
 
-	// Unblock child process: close the write end of the synchronization pipe
+	// Unblock child
 	_ = syncW.Close()
 
 	waitErr := cmd.Wait()
@@ -248,8 +242,24 @@ func applyCustomMounts(targetRoot string, mounts []MountSpec) error {
 		cleanDst := strings.TrimPrefix(m.ContainerPath, "/")
 		fullDst := filepath.Join(targetRoot, cleanDst)
 
-		if err := os.MkdirAll(fullDst, 0777); err != nil {
-			return fmt.Errorf("failed to create mount point %s: %w", fullDst, err)
+		hostFi, err := os.Stat(m.HostPath)
+		if err != nil {
+			return fmt.Errorf("failed to inspect mount source %s: %w", m.HostPath, err)
+		}
+
+		if hostFi.IsDir() {
+			if err := os.MkdirAll(fullDst, 0777); err != nil {
+				return fmt.Errorf("failed to create directory mount point %s: %w", fullDst, err)
+			}
+		} else {
+			if err := os.MkdirAll(filepath.Dir(fullDst), 0755); err != nil {
+				return fmt.Errorf("failed to create parent dir for %s: %w", fullDst, err)
+			}
+			f, err := os.OpenFile(fullDst, os.O_CREATE|os.O_WRONLY, 0755)
+			if err != nil {
+				return fmt.Errorf("failed to touch file mount point %s: %w", fullDst, err)
+			}
+			_ = f.Close()
 		}
 
 		if err := syscall.Mount(m.HostPath, fullDst, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {

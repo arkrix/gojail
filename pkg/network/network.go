@@ -19,7 +19,7 @@ import (
 const (
 	DefaultBridgeName = "gojail0"
 	DefaultBridgeCIDR = "10.200.0.1/24"
-	DefaultSubnetIP   = "10.200.0."
+	DefaultSubnetCIDR = "10.200.0.0/24"
 )
 
 // PortMapping defines host-to-container port forwarding rules for bridge networking.
@@ -33,14 +33,22 @@ type PortMapping struct {
 type Manager struct {
 	bridgeName string
 	bridgeCIDR string
+	ipam       *IPAM
 }
 
-// NewManager initializes a network manager instance.
+// NewManager initializes a network manager instance backed by an IPAM allocator.
 func NewManager() *Manager {
+	ipam, _ := NewIPAM(DefaultSubnetCIDR)
 	return &Manager{
 		bridgeName: DefaultBridgeName,
 		bridgeCIDR: DefaultBridgeCIDR,
+		ipam:       ipam,
 	}
+}
+
+// IPAM returns the underlying IPAM instance.
+func (m *Manager) IPAM() *IPAM {
+	return m.ipam
 }
 
 // EnsureBridge initializes the host software bridge and configures NAT forwarding.
@@ -78,29 +86,35 @@ func (m *Manager) EnsureBridge() (*netlink.Bridge, error) {
 	_ = os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0644)
 	_ = os.WriteFile("/proc/sys/net/ipv4/conf/all/route_localnet", []byte("1\n"), 0644)
 	_ = os.WriteFile("/proc/sys/net/ipv4/conf/all/rp_filter", []byte("0\n"), 0644)
+	_ = os.WriteFile("/proc/sys/net/ipv4/conf/lo/route_localnet", []byte("1\n"), 0644)
+	_ = os.WriteFile("/proc/sys/net/ipv4/conf/lo/rp_filter", []byte("0\n"), 0644)
 	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/route_localnet", m.bridgeName), []byte("1\n"), 0644)
 	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", m.bridgeName), []byte("0\n"), 0644)
 
-	// Configure iptables MASQUERADE for outbound traffic
-	_ = exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", "10.200.0.0/24", "!", "-o", m.bridgeName, "-j", "MASQUERADE").Run()
-	_ = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", "10.200.0.0/24", "!", "-o", m.bridgeName, "-j", "MASQUERADE").Run()
+	// Outbound Internet MASQUERADE
+	_ = exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", DefaultSubnetCIDR, "!", "-o", m.bridgeName, "-j", "MASQUERADE").Run()
+	_ = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", DefaultSubnetCIDR, "!", "-o", m.bridgeName, "-j", "MASQUERADE").Run()
+
+	// Unconditional bridge forwarding in both directions
+	_ = exec.Command("iptables", "-C", "FORWARD", "-o", m.bridgeName, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-A", "FORWARD", "-o", m.bridgeName, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-C", "FORWARD", "-i", m.bridgeName, "-j", "ACCEPT").Run()
+	_ = exec.Command("iptables", "-A", "FORWARD", "-i", m.bridgeName, "-j", "ACCEPT").Run()
 
 	return br, nil
 }
 
-// CalculateContainerIP calculates a deterministic IPv4 address based on the container ID.
-func CalculateContainerIP(containerID string) string {
-	hash := sha256.Sum256([]byte(containerID))
-	ipSuffix := (int(hash[0]) % 252) + 2
-	return fmt.Sprintf("%s%d", DefaultSubnetIP, ipSuffix)
-}
-
-// SetupContainerNetwork provisions a veth pair, attaches host end to bridge,
+// SetupContainerNetwork provisions a veth pair, leases an IP via IPAM, attaches host end to bridge,
 // moves container end into child PID's netns, configures routes, DNS, and port forwardings.
 func (m *Manager) SetupContainerNetwork(containerID string, pid int, rootfs string, portMappings []PortMapping) error {
 	br, err := m.EnsureBridge()
 	if err != nil {
 		return fmt.Errorf("failed to ensure bridge: %w", err)
+	}
+
+	containerIP, err := m.ipam.AllocateIP(containerID)
+	if err != nil {
+		return fmt.Errorf("failed to lease container IP: %w", err)
 	}
 
 	hash := sha256.Sum256([]byte(containerID))
@@ -122,34 +136,42 @@ func (m *Manager) SetupContainerNetwork(containerID string, pid int, rootfs stri
 	}
 
 	if err := netlink.LinkAdd(veth); err != nil {
+		_ = m.ipam.ReleaseIP(containerID)
 		return fmt.Errorf("failed to create veth pair (%s <-> %s): %w", vethHostName, vethPeerName, err)
 	}
 
 	if err := netlink.LinkSetUp(veth); err != nil {
+		_ = netlink.LinkDel(veth)
+		_ = m.ipam.ReleaseIP(containerID)
 		return fmt.Errorf("failed to bring host veth %s UP: %w", vethHostName, err)
 	}
 
 	peerLink, err := netlink.LinkByName(vethPeerName)
 	if err != nil {
+		_ = netlink.LinkDel(veth)
+		_ = m.ipam.ReleaseIP(containerID)
 		return fmt.Errorf("failed to locate peer veth %s: %w", vethPeerName, err)
 	}
 
 	if err := netlink.LinkSetNsPid(peerLink, pid); err != nil {
 		_ = netlink.LinkDel(veth)
+		_ = m.ipam.ReleaseIP(containerID)
 		return fmt.Errorf("failed to move peer veth into pid %d netns: %w", pid, err)
 	}
 
-	rawIP := CalculateContainerIP(containerID)
+	rawIP := containerIP.String()
 	containerCIDR := rawIP + "/24"
 
-	if err := configureInNetns(pid, vethPeerName, containerCIDR, "10.200.0.1"); err != nil {
+	if err := configureInNetns(pid, vethPeerName, containerCIDR, m.ipam.Gateway().String()); err != nil {
 		_ = netlink.LinkDel(veth)
+		_ = m.ipam.ReleaseIP(containerID)
 		return fmt.Errorf("failed to configure network inside container netns: %w", err)
 	}
 
 	if len(portMappings) > 0 {
 		if err := m.applyPortForwarding(rawIP, portMappings); err != nil {
 			_ = netlink.LinkDel(veth)
+			_ = m.ipam.ReleaseIP(containerID)
 			return fmt.Errorf("failed to apply port forwarding rules: %w", err)
 		}
 	}
@@ -175,7 +197,7 @@ func (m *Manager) applyPortForwarding(containerIP string, mappings []PortMapping
 		hostPortStr := strconv.Itoa(mapping.HostPort)
 		targetStr := fmt.Sprintf("%s:%d", containerIP, mapping.ContainerPort)
 
-		// 1. Ingress rule for packets arriving from external networks / other interfaces
+		// 1. Ingress rule for inbound external packets
 		cmdPrerouting := exec.Command("iptables", "-t", "nat", "-A", "PREROUTING",
 			"-p", proto, "--dport", hostPortStr,
 			"-j", "DNAT", "--to-destination", targetStr)
@@ -183,20 +205,18 @@ func (m *Manager) applyPortForwarding(containerIP string, mappings []PortMapping
 			return fmt.Errorf("failed to add PREROUTING DNAT rule: %s (%w)", string(out), err)
 		}
 
-		// 2. Ingress rule for host-originated connections targeting the host port
-		cmdOutput := exec.Command("iptables", "-t", "nat", "-A", "OUTPUT",
-			"-p", proto, "--dport", hostPortStr,
-			"-j", "DNAT", "--to-destination", targetStr)
-		_ = cmdOutput.Run()
+		// 2. Ingress rule for host-originated connections
+		_ = exec.Command("iptables", "-t", "nat", "-A", "OUTPUT",
+			"-p", proto, "-d", "127.0.0.1", "--dport", hostPortStr,
+			"-j", "DNAT", "--to-destination", targetStr).Run()
+		_ = exec.Command("iptables", "-t", "nat", "-A", "OUTPUT",
+			"-p", proto, "-d", "10.200.0.1", "--dport", hostPortStr,
+			"-j", "DNAT", "--to-destination", targetStr).Run()
 
-		// 3. Masquerade traffic routed through bridge to avoid asymmetric drops
-		cmdPost := exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
+		// 3. Masquerade traffic directed to container IP so container replies route back through host
+		_ = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
 			"-p", proto, "-d", containerIP, "--dport", strconv.Itoa(mapping.ContainerPort),
-			"-j", "MASQUERADE")
-		_ = cmdPost.Run()
-
-		// 4. Ensure FORWARD chain allows packet passage to container
-		_ = exec.Command("iptables", "-A", "FORWARD", "-p", proto, "-d", containerIP, "--dport", strconv.Itoa(mapping.ContainerPort), "-j", "ACCEPT").Run()
+			"-j", "MASQUERADE").Run()
 	}
 	return nil
 }
@@ -217,14 +237,16 @@ func (m *Manager) removePortForwarding(containerIP string, mappings []PortMappin
 			"-j", "DNAT", "--to-destination", targetStr).Run()
 
 		_ = exec.Command("iptables", "-t", "nat", "-D", "OUTPUT",
-			"-p", proto, "--dport", hostPortStr,
+			"-p", proto, "-d", "127.0.0.1", "--dport", hostPortStr,
+			"-j", "DNAT", "--to-destination", targetStr).Run()
+
+		_ = exec.Command("iptables", "-t", "nat", "-D", "OUTPUT",
+			"-p", proto, "-d", "10.200.0.1", "--dport", hostPortStr,
 			"-j", "DNAT", "--to-destination", targetStr).Run()
 
 		_ = exec.Command("iptables", "-t", "nat", "-D", "POSTROUTING",
 			"-p", proto, "-d", containerIP, "--dport", strconv.Itoa(mapping.ContainerPort),
 			"-j", "MASQUERADE").Run()
-
-		_ = exec.Command("iptables", "-D", "FORWARD", "-p", proto, "-d", containerIP, "--dport", strconv.Itoa(mapping.ContainerPort), "-j", "ACCEPT").Run()
 	}
 }
 
@@ -315,11 +337,13 @@ func injectResolvConf(rootfs string) error {
 	return os.WriteFile(resolvPath, []byte(data), 0644)
 }
 
-// Cleanup cleans up the host veth link and any DNAT rules configured for the container.
+// Cleanup cleans up the host veth link, DNAT rules, and releases the IPAM lease.
 func (m *Manager) Cleanup(containerID string, portMappings []PortMapping) {
-	if len(portMappings) > 0 {
-		rawIP := CalculateContainerIP(containerID)
-		m.removePortForwarding(rawIP, portMappings)
+	if containerIP, ok := m.ipam.GetIP(containerID); ok {
+		if len(portMappings) > 0 {
+			m.removePortForwarding(containerIP.String(), portMappings)
+		}
+		_ = m.ipam.ReleaseIP(containerID)
 	}
 
 	hash := sha256.Sum256([]byte(containerID))

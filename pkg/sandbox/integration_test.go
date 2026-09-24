@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +11,30 @@ import (
 
 // TestMain intercepts the re-exec hook when running under 'go test'
 func TestMain(m *testing.M) {
+	if len(os.Args) >= 2 && os.Args[1] == "__tcp_echo_server__" {
+		port := "8080"
+		if len(os.Args) >= 3 {
+			port = os.Args[2]
+		}
+		l, err := net.Listen("tcp", "0.0.0.0:"+port)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "listen error: %v\n", err)
+			os.Exit(1)
+		}
+		defer l.Close()
+
+		fmt.Println("READY")
+
+		conn, err := l.Accept()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "accept error: %v\n", err)
+			os.Exit(1)
+		}
+		_, _ = conn.Write([]byte("jail-ack\n"))
+		_ = conn.Close()
+		os.Exit(0)
+	}
+
 	if len(os.Args) >= 3 && os.Args[1] == "__init_child__" {
 		if err := InitChild(os.Args[2]); err != nil {
 			fmt.Fprintf(os.Stderr, "Error in test child init: %v\n", err)
@@ -76,7 +101,6 @@ func TestIntegration_TimeoutEnforcement(t *testing.T) {
 	if !res.TimedOut {
 		t.Errorf("expected timed_out to be true, got false")
 	}
-	// Allow scheduler tolerance (e.g. >= 450ms)
 	if res.Duration < 450*time.Millisecond || res.Duration > 2*time.Second {
 		t.Errorf("duration out of expected bounds: %v", res.Duration)
 	}
@@ -85,7 +109,6 @@ func TestIntegration_TimeoutEnforcement(t *testing.T) {
 func TestIntegration_NetworkIsolation(t *testing.T) {
 	requireRoot(t)
 
-	// Inside CLONE_NEWNET without egress, ping fails immediately
 	cfg := Config{
 		ID:               "test-net-isolation",
 		Command:          "/bin/sh",
@@ -110,8 +133,6 @@ func TestIntegration_NetworkIsolation(t *testing.T) {
 func TestIntegration_SeccompBlockSyscall(t *testing.T) {
 	requireRoot(t)
 
-	// In the jail, SYS_MOUNT is explicitly blocked by ApplySeccompDenylist.
-	// Running 'mount' inside the jail attempts SYS_MOUNT and will be blocked with EPERM.
 	cfg := Config{
 		ID:               "test-seccomp-block",
 		Command:          "/bin/sh",
@@ -128,7 +149,6 @@ func TestIntegration_SeccompBlockSyscall(t *testing.T) {
 		t.Fatalf("runner.Run() error: %v", err)
 	}
 
-	// mount command should fail with a non-zero exit code due to blocked SYS_MOUNT
 	if res.ExitCode == 0 {
 		t.Errorf("expected mount to be blocked by seccomp, but succeeded with exit code 0")
 	}

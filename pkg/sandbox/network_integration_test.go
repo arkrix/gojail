@@ -118,30 +118,17 @@ func TestIntegration_NetworkModeBridge_PortForwarding(t *testing.T) {
 	hostPort := 18080
 	containerPort := 8080
 
-	serverScript := fmt.Sprintf(`
-if command -v python3 >/dev/null 2>&1; then
-    python3 -u -c "
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(('0.0.0.0', %[1]d))
-s.listen(1)
-conn, _ = s.accept()
-conn.sendall(b'jail-ack\n')
-conn.close()
-s.close()
-"
-elif command -v nc >/dev/null 2>&1; then
-    echo 'jail-ack' | nc -l -p %[1]d || echo 'jail-ack' | nc -l %[1]d
-fi
-`, containerPort)
+	selfBin, err := os.Executable()
+	if err != nil {
+		t.Fatalf("failed to get test executable: %v", err)
+	}
 
 	cfg := Config{
 		ID:               fmt.Sprintf("test-net-dnat-%d", time.Now().UnixNano()),
 		MemoryLimitBytes: 128 * 1024 * 1024,
 		MaxProcesses:     32,
 		StorageLimitMB:   64,
-		Timeout:          8 * time.Second,
+		Timeout:          15 * time.Second,
 		NetworkMode:      "bridge",
 		PortMappings: []network.PortMapping{
 			{
@@ -150,10 +137,17 @@ fi
 				Protocol:      "tcp",
 			},
 		},
-		Command: "/bin/sh",
+		Mounts: []MountSpec{
+			{
+				HostPath:      selfBin,
+				ContainerPath: "/bin/echo_server",
+				ReadOnly:      true,
+			},
+		},
+		Command: "/bin/echo_server",
 		Args: []string{
-			"-c",
-			serverScript,
+			"__tcp_echo_server__",
+			fmt.Sprintf("%d", containerPort),
 		},
 	}
 
@@ -167,27 +161,43 @@ fi
 			return
 		}
 		if res.ExitCode != 0 {
-			errCh <- fmt.Errorf("container exited with %d: %s (stdout: %s)", res.ExitCode, res.Stderr, res.Stdout)
+			errCh <- fmt.Errorf("container exited with code %d: stderr=%q stdout=%q", res.ExitCode, res.Stderr, res.Stdout)
 			return
 		}
 		errCh <- nil
 	}()
 
-	// Connect to the host bridge IP which forwards through DNAT to the container
 	var conn net.Conn
 	var dialErr error
-	targetAddr := fmt.Sprintf("10.200.0.1:%d", hostPort)
 
-	for i := 0; i < 40; i++ {
+	endpoints := []string{
+		fmt.Sprintf("10.200.0.1:%d", hostPort),
+		fmt.Sprintf("127.0.0.1:%d", hostPort),
+	}
+
+	for i := 0; i < 50; i++ {
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("container failed before connection: %v", err)
+			}
+		default:
+		}
+
 		time.Sleep(100 * time.Millisecond)
-		conn, dialErr = net.DialTimeout("tcp", targetAddr, 250*time.Millisecond)
+		for _, ep := range endpoints {
+			conn, dialErr = net.DialTimeout("tcp", ep, 150*time.Millisecond)
+			if dialErr == nil {
+				break
+			}
+		}
 		if dialErr == nil {
 			break
 		}
 	}
 
 	if dialErr != nil {
-		t.Fatalf("failed to connect to host port %s: %v", targetAddr, dialErr)
+		t.Fatalf("failed to connect to host port %d: %v", hostPort, dialErr)
 	}
 	defer conn.Close()
 
