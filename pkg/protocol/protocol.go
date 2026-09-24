@@ -39,6 +39,7 @@ type Request struct {
 	SeccompProfile   string                `json:"seccomp_profile,omitempty"`
 	NetworkMode      string                `json:"network_mode,omitempty"`
 	PortMappings     []network.PortMapping `json:"port_mappings,omitempty"`
+	DNSServers       []string              `json:"dns_servers,omitempty"`
 }
 
 // StatsPayload represents a point-in-time metrics sample streamed from daemon to client.

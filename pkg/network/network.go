@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -106,7 +105,7 @@ func (m *Manager) EnsureBridge() (*netlink.Bridge, error) {
 
 // SetupContainerNetwork provisions a veth pair, leases an IP via IPAM, attaches host end to bridge,
 // moves container end into child PID's netns, configures routes, DNS, and port forwardings.
-func (m *Manager) SetupContainerNetwork(containerID string, pid int, rootfs string, portMappings []PortMapping) error {
+func (m *Manager) SetupContainerNetwork(containerID string, pid int, rootfs string, portMappings []PortMapping, dnsServers []string) error {
 	br, err := m.EnsureBridge()
 	if err != nil {
 		return fmt.Errorf("failed to ensure bridge: %w", err)
@@ -177,7 +176,7 @@ func (m *Manager) SetupContainerNetwork(containerID string, pid int, rootfs stri
 	}
 
 	if rootfs != "" {
-		_ = injectResolvConf(rootfs)
+		_ = InjectResolvConf(rootfs, dnsServers)
 	}
 
 	return nil
@@ -197,7 +196,6 @@ func (m *Manager) applyPortForwarding(containerIP string, mappings []PortMapping
 		hostPortStr := strconv.Itoa(mapping.HostPort)
 		targetStr := fmt.Sprintf("%s:%d", containerIP, mapping.ContainerPort)
 
-		// 1. Ingress rule for inbound external packets
 		cmdPrerouting := exec.Command("iptables", "-t", "nat", "-A", "PREROUTING",
 			"-p", proto, "--dport", hostPortStr,
 			"-j", "DNAT", "--to-destination", targetStr)
@@ -205,7 +203,6 @@ func (m *Manager) applyPortForwarding(containerIP string, mappings []PortMapping
 			return fmt.Errorf("failed to add PREROUTING DNAT rule: %s (%w)", string(out), err)
 		}
 
-		// 2. Ingress rule for host-originated connections
 		_ = exec.Command("iptables", "-t", "nat", "-A", "OUTPUT",
 			"-p", proto, "-d", "127.0.0.1", "--dport", hostPortStr,
 			"-j", "DNAT", "--to-destination", targetStr).Run()
@@ -213,7 +210,6 @@ func (m *Manager) applyPortForwarding(containerIP string, mappings []PortMapping
 			"-p", proto, "-d", "10.200.0.1", "--dport", hostPortStr,
 			"-j", "DNAT", "--to-destination", targetStr).Run()
 
-		// 3. Masquerade traffic directed to container IP so container replies route back through host
 		_ = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
 			"-p", proto, "-d", containerIP, "--dport", strconv.Itoa(mapping.ContainerPort),
 			"-j", "MASQUERADE").Run()
@@ -323,18 +319,6 @@ func configureInNetns(pid int, peerName, containerCIDR, gatewayIP string) error 
 	}
 
 	return nil
-}
-
-// injectResolvConf writes reliable fallback DNS resolvers into the container rootfs.
-func injectResolvConf(rootfs string) error {
-	etcDir := filepath.Join(rootfs, "etc")
-	if err := os.MkdirAll(etcDir, 0755); err != nil {
-		return err
-	}
-
-	resolvPath := filepath.Join(etcDir, "resolv.conf")
-	data := "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
-	return os.WriteFile(resolvPath, []byte(data), 0644)
 }
 
 // Cleanup cleans up the host veth link, DNAT rules, and releases the IPAM lease.

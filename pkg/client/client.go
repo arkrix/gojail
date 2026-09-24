@@ -33,6 +33,7 @@ type ExecOptions struct {
 	SeccompProfile   string
 	NetworkMode      string
 	PortMappings     []network.PortMapping
+	DNSServers       []string
 }
 
 // Response models the aggregate result returned to CLI callers.
@@ -234,6 +235,7 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 		SeccompProfile:   opts.SeccompProfile,
 		NetworkMode:      opts.NetworkMode,
 		PortMappings:     opts.PortMappings,
+		DNSServers:       opts.DNSServers,
 	}
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {

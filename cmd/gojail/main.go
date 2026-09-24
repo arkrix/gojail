@@ -146,6 +146,9 @@ func handleRunCommand(args []string) {
 	fs.Var(&ports, "p", "Port forwarding: host_port:container_port[/tcp|udp]")
 	fs.Var(&ports, "publish", "Port forwarding: host_port:container_port[/tcp|udp]")
 
+	var dnsServers stringListFlags
+	fs.Var(&dnsServers, "dns", "Custom DNS nameserver IP")
+
 	if err := fs.Parse(normalizedArgs); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
 		os.Exit(1)
@@ -163,8 +166,8 @@ func handleRunCommand(args []string) {
 		os.Exit(1)
 	}
 
-	// Auto-enable bridge mode if ports are forwarded
-	if len(portMappings) > 0 && *netMode == "none" {
+	// Auto-enable bridge mode if ports or DNS are configured
+	if (len(portMappings) > 0 || len(dnsServers) > 0) && *netMode == "none" {
 		*netMode = "bridge"
 	}
 
@@ -217,6 +220,7 @@ func handleRunCommand(args []string) {
 		SeccompProfile:   *seccompProfile,
 		NetworkMode:      *netMode,
 		PortMappings:     portMappings,
+		DNSServers:       dnsServers,
 	}
 
 	resp, err := c.Run(opts)
@@ -434,6 +438,9 @@ func handleDirectCommand(args []string) {
 	fs.Var(&ports, "p", "Port forwarding: host_port:container_port[/tcp|udp]")
 	fs.Var(&ports, "publish", "Port forwarding: host_port:container_port[/tcp|udp]")
 
+	var dnsServers stringListFlags
+	fs.Var(&dnsServers, "dns", "Custom DNS nameserver IP")
+
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
 		os.Exit(1)
@@ -451,7 +458,7 @@ func handleDirectCommand(args []string) {
 		os.Exit(1)
 	}
 
-	if len(portMappings) > 0 && *netMode == "none" {
+	if (len(portMappings) > 0 || len(dnsServers) > 0) && *netMode == "none" {
 		*netMode = "bridge"
 	}
 
@@ -479,6 +486,7 @@ func handleDirectCommand(args []string) {
 		SeccompProfile:   *seccompProfile,
 		NetworkMode:      *netMode,
 		PortMappings:     portMappings,
+		DNSServers:       dnsServers,
 	}
 
 	runner := sandbox.NewRunner(cfg)
@@ -512,6 +520,7 @@ func printUsage() {
 	fmt.Println("  -it            Run an interactive session connected to a pseudo-TTY")
 	fmt.Println("  --net mode     Network isolation: 'none' (default) or 'bridge'")
 	fmt.Println("  -p, --publish  Port forwarding: host:container[/tcp|udp]")
+	fmt.Println("  --dns ip       Custom DNS nameserver IP (can be specified multiple times)")
 	fmt.Println("  -v, --volume   Bind mount: host:target[:ro|rw] (can be specified multiple times)")
 	fmt.Println("  -mem int       Memory ceiling in MB (default 128)")
 	fmt.Println("  -procs int     Max processes (default 64)")

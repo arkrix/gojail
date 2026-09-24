@@ -222,3 +222,38 @@ func TestIntegration_NetworkModeBridge_PortForwarding(t *testing.T) {
 		t.Fatal("timed out waiting for container exit")
 	}
 }
+
+func TestIntegration_NetworkModeBridge_CustomDNS(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("skipping custom DNS test; root privileges required")
+	}
+
+	cfg := Config{
+		ID:               fmt.Sprintf("test-net-dns-%d", time.Now().UnixNano()),
+		MemoryLimitBytes: 128 * 1024 * 1024,
+		MaxProcesses:     32,
+		StorageLimitMB:   64,
+		Timeout:          5 * time.Second,
+		NetworkMode:      "bridge",
+		DNSServers:       []string{"9.9.9.9", "1.1.1.1"},
+		Command:          "/bin/sh",
+		Args: []string{
+			"-c",
+			"cat /etc/resolv.conf",
+		},
+	}
+
+	runner := NewRunner(cfg)
+	res, err := runner.Run()
+	if err != nil {
+		t.Fatalf("failed to run bridge container with custom DNS: %v", err)
+	}
+
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d (stderr: %s)", res.ExitCode, res.Stderr)
+	}
+
+	if !strings.Contains(res.Stdout, "nameserver 9.9.9.9") || !strings.Contains(res.Stdout, "nameserver 1.1.1.1") {
+		t.Errorf("resolv.conf did not contain custom DNS servers, got:\n%s", res.Stdout)
+	}
+}

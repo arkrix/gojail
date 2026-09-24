@@ -232,7 +232,7 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 	// Setup bridge network & port forwarding if requested
 	if req.NetworkMode == "bridge" || len(req.PortMappings) > 0 {
 		netMgr := network.NewManager()
-		if err := netMgr.SetupContainerNetwork(worker.ID, worker.PID(), worker.RootPath(), req.PortMappings); err != nil {
+		if err := netMgr.SetupContainerNetwork(worker.ID, worker.PID(), worker.RootPath(), req.PortMappings, req.DNSServers); err != nil {
 			d.registry.UpdateFinished(worker.ID, 1, 0, false)
 			_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
 				ExitCode: 1,

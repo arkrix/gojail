@@ -92,6 +92,7 @@ type Config struct {
 	SeccompProfile   string                `json:"seccomp_profile,omitempty"`
 	NetworkMode      string                `json:"network_mode,omitempty"` // "none" (air-gapped) or "bridge" (veth + outbound NAT)
 	PortMappings     []network.PortMapping `json:"port_mappings,omitempty"`
+	DNSServers       []string              `json:"dns_servers,omitempty"`
 }
 
 // Result holds standard output, errors, execution timings, and resource telemetry.
