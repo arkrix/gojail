@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/arkrix/gojail/pkg/network"
 	"github.com/arkrix/gojail/pkg/protocol"
 )
 
@@ -27,6 +28,12 @@ func TestClient_Run(t *testing.T) {
 		}
 		defer conn.Close()
 
+		// Read the incoming client request first to prevent broken pipe (RST)
+		var req protocol.Request
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			return
+		}
+
 		fw := protocol.NewFrameWriter(conn)
 		_ = fw.WriteFrame(protocol.StreamStdout, []byte("hello from daemon"))
 		_ = fw.WriteExitFrame(protocol.ExitPayload{
@@ -46,6 +53,57 @@ func TestClient_Run(t *testing.T) {
 
 	if resp.ExitCode != 0 {
 		t.Errorf("expected exit code 0, got %d", resp.ExitCode)
+	}
+}
+
+func TestClient_Run_WithNetworkOptions(t *testing.T) {
+	tmpDir := t.TempDir()
+	sockPath := filepath.Join(tmpDir, "test_net.sock")
+
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer l.Close()
+
+	var receivedReq protocol.Request
+	go func() {
+		conn, aErr := l.Accept()
+		if aErr != nil {
+			return
+		}
+		defer conn.Close()
+
+		if err := json.NewDecoder(conn).Decode(&receivedReq); err != nil {
+			return
+		}
+
+		fw := protocol.NewFrameWriter(conn)
+		_ = fw.WriteExitFrame(protocol.ExitPayload{
+			ExitCode: 0,
+		})
+	}()
+
+	c := NewClient(sockPath)
+	_, err = c.Run(ExecOptions{
+		Command:     "/bin/echo",
+		NetworkMode: "bridge",
+		PortMappings: []network.PortMapping{
+			{HostPort: 8080, ContainerPort: 80, Protocol: "tcp"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if receivedReq.NetworkMode != "bridge" {
+		t.Errorf("expected NetworkMode 'bridge', got %q", receivedReq.NetworkMode)
+	}
+	if len(receivedReq.PortMappings) != 1 {
+		t.Fatalf("expected 1 port mapping, got %d", len(receivedReq.PortMappings))
+	}
+	if receivedReq.PortMappings[0].HostPort != 8080 || receivedReq.PortMappings[0].ContainerPort != 80 {
+		t.Errorf("port mapping corrupted in wire transit: %+v", receivedReq.PortMappings[0])
 	}
 }
 
@@ -75,6 +133,11 @@ func TestClient_StreamStats(t *testing.T) {
 			return
 		}
 		defer conn.Close()
+
+		var req protocol.Request
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			return
+		}
 
 		fw := protocol.NewFrameWriter(conn)
 		_ = fw.WriteStatsFrame(protocol.StatsPayload{

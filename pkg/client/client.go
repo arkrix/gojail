@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/arkrix/gojail/pkg/network"
 	"github.com/arkrix/gojail/pkg/protocol"
 	"github.com/arkrix/gojail/pkg/sandbox"
 	"golang.org/x/term"
@@ -30,6 +31,8 @@ type ExecOptions struct {
 	Stdout           io.Writer
 	Stderr           io.Writer
 	SeccompProfile   string
+	NetworkMode      string
+	PortMappings     []network.PortMapping
 }
 
 // Response models the aggregate result returned to CLI callers.
@@ -229,6 +232,8 @@ func (c *Client) Run(opts ExecOptions) (*Response, error) {
 		Mounts:           opts.Mounts,
 		TTY:              opts.TTY,
 		SeccompProfile:   opts.SeccompProfile,
+		NetworkMode:      opts.NetworkMode,
+		PortMappings:     opts.PortMappings,
 	}
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {

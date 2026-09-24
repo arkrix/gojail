@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/arkrix/gojail/pkg/config"
+	"github.com/arkrix/gojail/pkg/network"
 	"github.com/arkrix/gojail/pkg/protocol"
 	"github.com/arkrix/gojail/pkg/sandbox"
 )
@@ -228,7 +229,21 @@ func (d *Daemon) handleConnection(conn net.Conn) {
 		return
 	}
 
-	d.registry.Register(worker.ID, 0, req.Command, req.Args, cancel)
+	// Setup bridge network & port forwarding if requested
+	if req.NetworkMode == "bridge" || len(req.PortMappings) > 0 {
+		netMgr := network.NewManager()
+		if err := netMgr.SetupContainerNetwork(worker.ID, worker.PID(), worker.RootPath(), req.PortMappings); err != nil {
+			d.registry.UpdateFinished(worker.ID, 1, 0, false)
+			_ = frameWriter.WriteExitFrame(protocol.ExitPayload{
+				ExitCode: 1,
+				Error:    fmt.Sprintf("failed to setup worker network: %v", err),
+			})
+			return
+		}
+		defer netMgr.Cleanup(worker.ID, req.PortMappings)
+	}
+
+	d.registry.Register(worker.ID, worker.PID(), req.Command, req.Args, cancel)
 	d.registry.AttachCgroup(worker.ID, worker.Cgroup(), req.MemoryLimitBytes, req.MaxProcesses)
 
 	var writeMu sync.Mutex

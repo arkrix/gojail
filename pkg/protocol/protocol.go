@@ -8,6 +8,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/arkrix/gojail/pkg/network"
 	"github.com/arkrix/gojail/pkg/sandbox"
 )
 
@@ -24,18 +25,20 @@ const (
 
 // Request defines the unified initial JSON payload sent from client to daemon.
 type Request struct {
-	Action           string              `json:"action,omitempty"` // "run", "list", "stop", "stats"
-	TargetID         string              `json:"target_id,omitempty"`
-	Command          string              `json:"command,omitempty"`
-	Args             []string            `json:"args,omitempty"`
-	Env              []string            `json:"env,omitempty"`
-	Timeout          time.Duration       `json:"timeout,omitempty"`
-	MemoryLimitBytes int64               `json:"memory_limit_bytes,omitempty"`
-	MaxProcesses     int64               `json:"max_processes,omitempty"`
-	StorageLimitMB   int64               `json:"storage_limit_mb,omitempty"`
-	Mounts           []sandbox.MountSpec `json:"mounts,omitempty"`
-	TTY              bool                `json:"tty,omitempty"`
-	SeccompProfile   string              `json:"seccomp_profile,omitempty"`
+	Action           string                `json:"action,omitempty"` // "run", "list", "stop", "stats"
+	TargetID         string                `json:"target_id,omitempty"`
+	Command          string                `json:"command,omitempty"`
+	Args             []string              `json:"args,omitempty"`
+	Env              []string              `json:"env,omitempty"`
+	Timeout          time.Duration         `json:"timeout,omitempty"`
+	MemoryLimitBytes int64                 `json:"memory_limit_bytes,omitempty"`
+	MaxProcesses     int64                 `json:"max_processes,omitempty"`
+	StorageLimitMB   int64                 `json:"storage_limit_mb,omitempty"`
+	Mounts           []sandbox.MountSpec   `json:"mounts,omitempty"`
+	TTY              bool                  `json:"tty,omitempty"`
+	SeccompProfile   string                `json:"seccomp_profile,omitempty"`
+	NetworkMode      string                `json:"network_mode,omitempty"`
+	PortMappings     []network.PortMapping `json:"port_mappings,omitempty"`
 }
 
 // StatsPayload represents a point-in-time metrics sample streamed from daemon to client.

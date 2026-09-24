@@ -4,23 +4,25 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/arkrix/gojail/pkg/client"
+	"github.com/arkrix/gojail/pkg/network"
 	"github.com/arkrix/gojail/pkg/protocol"
 	"github.com/arkrix/gojail/pkg/sandbox"
 )
 
-type volumeFlags []string
+type stringListFlags []string
 
-func (v *volumeFlags) String() string {
-	return fmt.Sprint(*v)
+func (s *stringListFlags) String() string {
+	return fmt.Sprint(*s)
 }
 
-func (v *volumeFlags) Set(value string) error {
-	*v = append(*v, value)
+func (s *stringListFlags) Set(value string) error {
+	*s = append(*s, value)
 	return nil
 }
 
@@ -34,6 +36,45 @@ func parseMounts(rawMounts []string) ([]sandbox.MountSpec, error) {
 		specs = append(specs, *spec)
 	}
 	return specs, nil
+}
+
+func parsePortMappings(rawPorts []string) ([]network.PortMapping, error) {
+	var mappings []network.PortMapping
+	for _, p := range rawPorts {
+		// format: host_port:container_port[/protocol]
+		proto := "tcp"
+		portPart := p
+		if slashIdx := strings.Index(p, "/"); slashIdx != -1 {
+			proto = strings.ToLower(p[slashIdx+1:])
+			portPart = p[:slashIdx]
+		}
+
+		parts := strings.Split(portPart, ":")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid port mapping %q (expected host_port:container_port[/tcp|udp])", p)
+		}
+
+		hp, err := strconv.Atoi(parts[0])
+		if err != nil || hp <= 0 || hp > 65535 {
+			return nil, fmt.Errorf("invalid host port in %q", p)
+		}
+
+		cp, err := strconv.Atoi(parts[1])
+		if err != nil || cp <= 0 || cp > 65535 {
+			return nil, fmt.Errorf("invalid container port in %q", p)
+		}
+
+		if proto != "tcp" && proto != "udp" {
+			return nil, fmt.Errorf("invalid protocol %q (must be tcp or udp)", proto)
+		}
+
+		mappings = append(mappings, network.PortMapping{
+			HostPort:      hp,
+			ContainerPort: cp,
+			Protocol:      proto,
+		})
+	}
+	return mappings, nil
 }
 
 func main() {
@@ -95,10 +136,15 @@ func handleRunCommand(args []string) {
 	interactive := fs.Bool("i", false, "Keep STDIN open")
 	tty := fs.Bool("t", false, "Allocate a pseudo-TTY")
 	seccompProfile := fs.String("seccomp", "", "Path to custom JSON seccomp profile")
+	netMode := fs.String("net", "none", "Network mode: 'none' (air-gapped) or 'bridge' (veth + outbound nat)")
 
-	var volumes volumeFlags
+	var volumes stringListFlags
 	fs.Var(&volumes, "v", "Volume bind mount: host_dir:jail_target[:ro|rw]")
 	fs.Var(&volumes, "volume", "Volume bind mount: host_dir:jail_target[:ro|rw]")
+
+	var ports stringListFlags
+	fs.Var(&ports, "p", "Port forwarding: host_port:container_port[/tcp|udp]")
+	fs.Var(&ports, "publish", "Port forwarding: host_port:container_port[/tcp|udp]")
 
 	if err := fs.Parse(normalizedArgs); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
@@ -109,6 +155,17 @@ func handleRunCommand(args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error in volume specification: %v\n", err)
 		os.Exit(1)
+	}
+
+	portMappings, err := parsePortMappings(ports)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error in port mapping specification: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Auto-enable bridge mode if ports are forwarded
+	if len(portMappings) > 0 && *netMode == "none" {
+		*netMode = "bridge"
 	}
 
 	isInteractive := *interactive && *tty
@@ -158,6 +215,8 @@ func handleRunCommand(args []string) {
 		Stdout:           os.Stdout,
 		Stderr:           os.Stderr,
 		SeccompProfile:   *seccompProfile,
+		NetworkMode:      *netMode,
+		PortMappings:     portMappings,
 	}
 
 	resp, err := c.Run(opts)
@@ -365,10 +424,15 @@ func handleDirectCommand(args []string) {
 	procsMax := fs.Int64("procs", 32, "Maximum allowed processes")
 	storageMB := fs.Int64("storage", 64, "Storage ceiling in megabytes")
 	seccompProfile := fs.String("seccomp", "", "Path to custom JSON seccomp profile")
+	netMode := fs.String("net", "none", "Network mode: 'none' or 'bridge'")
 
-	var volumes volumeFlags
+	var volumes stringListFlags
 	fs.Var(&volumes, "v", "Volume bind mount: host_dir:jail_target[:ro|rw]")
 	fs.Var(&volumes, "volume", "Volume bind mount: host_dir:jail_target[:ro|rw]")
+
+	var ports stringListFlags
+	fs.Var(&ports, "p", "Port forwarding: host_port:container_port[/tcp|udp]")
+	fs.Var(&ports, "publish", "Port forwarding: host_port:container_port[/tcp|udp]")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
@@ -379,6 +443,16 @@ func handleDirectCommand(args []string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error in volume specification: %v\n", err)
 		os.Exit(1)
+	}
+
+	portMappings, err := parsePortMappings(ports)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error in port mapping specification: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(portMappings) > 0 && *netMode == "none" {
+		*netMode = "bridge"
 	}
 
 	scriptBody := *codeFlag
@@ -403,6 +477,8 @@ func handleDirectCommand(args []string) {
 		Env:              []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/tmp"},
 		Mounts:           mountSpecs,
 		SeccompProfile:   *seccompProfile,
+		NetworkMode:      *netMode,
+		PortMappings:     portMappings,
 	}
 
 	runner := sandbox.NewRunner(cfg)
@@ -434,6 +510,8 @@ func printUsage() {
 	fmt.Println("  direct         Execute command directly using root permissions (standalone mode)")
 	fmt.Println("\nOptions for run:")
 	fmt.Println("  -it            Run an interactive session connected to a pseudo-TTY")
+	fmt.Println("  --net mode     Network isolation: 'none' (default) or 'bridge'")
+	fmt.Println("  -p, --publish  Port forwarding: host:container[/tcp|udp]")
 	fmt.Println("  -v, --volume   Bind mount: host:target[:ro|rw] (can be specified multiple times)")
 	fmt.Println("  -mem int       Memory ceiling in MB (default 128)")
 	fmt.Println("  -procs int     Max processes (default 64)")

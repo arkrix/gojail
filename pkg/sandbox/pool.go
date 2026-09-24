@@ -19,6 +19,7 @@ import (
 type Worker struct {
 	ID        string
 	StorageMB int64
+	rootPath  string
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
 	stdoutR   io.ReadCloser
@@ -31,6 +32,19 @@ type Worker struct {
 // Cgroup returns the underlying CgroupController for metrics and telemetry sampling.
 func (w *Worker) Cgroup() *CgroupController {
 	return w.cgroup
+}
+
+// PID returns the process ID of the running worker container.
+func (w *Worker) PID() int {
+	if w.cmd != nil && w.cmd.Process != nil {
+		return w.cmd.Process.Pid
+	}
+	return 0
+}
+
+// RootPath returns the root directory path of the worker's overlay filesystem.
+func (w *Worker) RootPath() string {
+	return w.rootPath
 }
 
 // Pool maintains a standby pool of warmed sandbox processes.
@@ -166,6 +180,7 @@ func (p *Pool) spawnWorker(storageMB int64, mounts []MountSpec, isTTY bool, init
 		return &Worker{
 			ID:        workerID,
 			StorageMB: storageMB,
+			rootPath:  targetRoot,
 			cmd:       cmd,
 			cgroup:    cg,
 			overlay:   overlay,
@@ -229,6 +244,7 @@ func (p *Pool) spawnWorker(storageMB int64, mounts []MountSpec, isTTY bool, init
 	return &Worker{
 		ID:        workerID,
 		StorageMB: storageMB,
+		rootPath:  targetRoot,
 		cmd:       cmd,
 		stdin:     stdinPipe,
 		stdoutR:   stdoutPipe,
