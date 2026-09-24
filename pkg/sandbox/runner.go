@@ -88,7 +88,17 @@ func (r *Runner) Run() (*Result, error) {
 		return nil, fmt.Errorf("failed to get executable path: %w", err)
 	}
 
+	// Create synchronization pipe so child waits for host setup (e.g. networking)
+	syncR, syncW, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sync pipe: %w", err)
+	}
+	defer syncW.Close()
+
 	cmd := exec.CommandContext(ctx, selfBin, "__init_child__", string(cfgBytes))
+
+	// Pass sync reader as FD 3 (first ExtraFile)
+	cmd.ExtraFiles = []*os.File{syncR}
 
 	// Allocate new namespaces: Mount, PID, UTS, IPC, Network
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -106,8 +116,12 @@ func (r *Runner) Run() (*Result, error) {
 	start := time.Now()
 
 	if err := cmd.Start(); err != nil {
+		_ = syncR.Close()
 		return nil, fmt.Errorf("failed to start containerized child: %w", err)
 	}
+
+	// Close parent's copy of the read end
+	_ = syncR.Close()
 
 	childPid := cmd.Process.Pid
 
@@ -126,6 +140,9 @@ func (r *Runner) Run() (*Result, error) {
 		}
 		defer netMgr.Cleanup(r.cfg.ID, r.cfg.PortMappings)
 	}
+
+	// Unblock child process: close the write end of the synchronization pipe
+	_ = syncW.Close()
 
 	waitErr := cmd.Wait()
 	duration := time.Since(start)
@@ -329,6 +346,14 @@ func InitChild(cfgJSON string) error {
 	}
 
 	_ = configureLoopback()
+
+	// Wait for parent host to finish network plumbing (extra file descriptor 3)
+	syncPipe := os.NewFile(uintptr(3), "syncPipe")
+	if syncPipe != nil {
+		buf := make([]byte, 1)
+		_, _ = syncPipe.Read(buf)
+		_ = syncPipe.Close()
+	}
 
 	if err := dropPrivileges(cfg.SeccompProfile); err != nil {
 		return fmt.Errorf("child: privilege drop failed: %w", err)
